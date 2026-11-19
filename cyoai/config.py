@@ -3,7 +3,16 @@ from dataclasses import asdict, dataclass, fields
 import json
 import os
 from pathlib import Path
+import stat
+import sys
 import tempfile
+
+PROVIDERS = ("anthropic", "openai", "fake")
+DEFAULT_MODELS = {"openai": "gpt-4o", "anthropic": "claude-sonnet-4-5", "fake": "fake"}
+
+
+class ConfigError(ValueError):
+    pass
 
 
 @dataclass
@@ -20,9 +29,48 @@ def config_dir() -> Path:
     return Path(os.environ.get("CYOAI_CONFIG_DIR", "~/.config/cyoai")).expanduser()
 
 
+def _read_config_file(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    hint = f"Fix it or delete it and run `cyoai init` again."
+    try:
+        if not path.is_file():
+            raise ConfigError(f"Config path {path} is not a file. {hint}")
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077 and os.name != "nt":
+            try:
+                if path.is_symlink() or path.stat().st_uid != os.getuid():
+                    raise PermissionError
+                path.chmod(0o600)
+                print(f"cyoai: warning: {path} was readable by other users (mode {mode:o}); "
+                      "changed it to 600", file=sys.stderr)
+            except OSError:
+                print(f"cyoai: warning: {path} is readable by other users (mode {mode:o}); "
+                      f"run `chmod 600 {path}`", file=sys.stderr)
+        text = path.read_text()
+    except OSError as exc:
+        raise ConfigError(f"Cannot read config file {path}: {exc.strerror}. "
+                          f"Run `chmod 600 {path}` or delete it and run `cyoai init`.") from None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"Config file {path} is not valid JSON "
+                          f"(line {exc.lineno}, column {exc.colno}). {hint}") from None
+    if not isinstance(data, dict):
+        raise ConfigError(f"Config file {path} must contain a JSON object. {hint}")
+    for f in fields(Config):
+        value = data.get(f.name)
+        if f.name in data and not (isinstance(value, str) or (value is None and f.name == "llm_base_url")):
+            if f.name != "llm_model":
+                raise ConfigError(f"Config file {path}: {f.name} must be a string. {hint}")
+            print(f"cyoai: warning: config file {path}: llm_model must be a string; "
+                  "using the provider default. Run `cyoai init` to fix it.", file=sys.stderr)
+            del data[f.name]
+    return data
+
+
 def load_config() -> Config:
-    path = config_dir() / "config.json"
-    data = json.loads(path.read_text()) if path.exists() else {}
+    data = _read_config_file(config_dir() / "config.json")
     data = {f.name: data[f.name] for f in fields(Config) if f.name in data}
     provider_override = os.environ.get("CYOAI_LLM_PROVIDER")
     if provider_override is not None and provider_override != data.get("llm_provider", "anthropic"):
@@ -40,16 +88,18 @@ def load_config() -> Config:
     if key_env is not None and key_env in os.environ:
         data["llm_api_key"] = os.environ[key_env]
     if "llm_model" not in data:
-        data["llm_model"] = {"openai": "gpt-4o", "anthropic": "claude-sonnet-4-5",
-                             "fake": "fake"}.get(provider, "claude-sonnet-4-5")
+        data["llm_model"] = DEFAULT_MODELS.get(provider, "claude-sonnet-4-5")
     return Config(**data)
 
 
 def save_config(config: Config) -> None:
     directory = config_dir()
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    directory.chmod(0o700)
-    fd, temporary = tempfile.mkstemp(dir=directory)
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
+        fd, temporary = tempfile.mkstemp(dir=directory)
+    except OSError as exc:
+        raise ConfigError(f"Cannot write config directory {directory}: {exc.strerror}") from None
     try:
         with os.fdopen(fd, "w") as handle:
             json.dump(asdict(config), handle, indent=2)

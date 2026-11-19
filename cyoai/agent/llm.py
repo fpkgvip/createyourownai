@@ -62,6 +62,8 @@ class FakeLLM:
 def make_llm(config: Config) -> LLMClient:
     if config.llm_provider == "fake":
         return FakeLLM()
+    if config.llm_provider not in ("anthropic", "openai"):
+        raise ValueError(f"Unknown LLM provider {config.llm_provider!r}: choose anthropic, openai or fake")
     if not config.llm_api_key:
         raise ValueError("No LLM API key configured. Run cyoai init first.")
     if config.llm_provider == "anthropic":

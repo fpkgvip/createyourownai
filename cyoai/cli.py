@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import warnings
 
-from cyoai.config import Config, load_config, masked_config, save_config
+from cyoai.config import DEFAULT_MODELS, PROVIDERS, Config, load_config, masked_config, save_config
 from cyoai.agent.llm import FakeLLM, make_llm
 from cyoai.agent.loop import ResearchLoop
 from cyoai.agent.runners import DRY_RUN_ARTIFACT, FakeRunner, LocalRunner, RemoteRunner, scrub_env
@@ -42,15 +42,30 @@ def managed_instance(provider, **kwargs):
 def init_command(args):
     config = load_config()
     if not args.non_interactive:
-        config.llm_provider = input(f"LLM provider [{config.llm_provider}]: ").strip() or config.llm_provider
-        default = "gpt-4o" if config.llm_provider == "openai" else "claude-sonnet-4-5"
-        config.llm_model = input(f"Model [{default}]: ").strip() or default
-        config.llm_api_key = getpass.getpass("LLM API key (blank to keep): ") or config.llm_api_key
-        config.llm_base_url = input("OpenAI-compatible base URL (optional): ").strip() or None
-        config.runpod_api_key = getpass.getpass("RunPod API key (optional): ") or config.runpod_api_key
-        config.vast_api_key = getpass.getpass("Vast API key (optional): ") or config.vast_api_key
+        config_provider = config.llm_provider
+        try:
+            previous = (args.llm_provider or config.llm_provider).strip().lower()
+            provider = input(f"LLM provider ({', '.join(PROVIDERS)}) [{previous}]: ").strip().lower()
+            config.llm_provider = provider or previous
+            if config.llm_provider not in PROVIDERS:
+                raise ValueError(f"Unknown LLM provider {config.llm_provider!r}: "
+                                 f"choose one of {', '.join(PROVIDERS)}")
+            default = (config.llm_model if config.llm_provider == config_provider
+                       else DEFAULT_MODELS[config.llm_provider])
+            config.llm_model = input(f"Model [{default}]: ").strip() or default
+            config.llm_api_key = getpass.getpass("LLM API key (blank to keep): ") or config.llm_api_key
+            current_url = config.llm_base_url or ""
+            base_url = input(f"OpenAI-compatible base URL (optional, '-' to clear) [{current_url}]: ").strip()
+            config.llm_base_url = None if base_url == "-" else base_url or config.llm_base_url
+            config.runpod_api_key = getpass.getpass("RunPod API key (blank to keep): ") or config.runpod_api_key
+            config.vast_api_key = getpass.getpass("Vast API key (blank to keep): ") or config.vast_api_key
+        except EOFError:
+            raise ValueError("Input ended before setup finished; nothing was saved. "
+                             "Use `cyoai init --non-interactive` with flags to configure without prompts.") from None
+    if args.llm_provider:
+        args.llm_provider = args.llm_provider.strip().lower()
     if args.llm_provider and not args.llm_model and args.llm_provider != config.llm_provider:
-        config.llm_model = "gpt-4o" if args.llm_provider == "openai" else "claude-sonnet-4-5"
+        config.llm_model = DEFAULT_MODELS.get(args.llm_provider, "claude-sonnet-4-5")
     if args.llm_provider and not args.llm_api_key:
         key_env = "OPENAI_API_KEY" if args.llm_provider == "openai" else "ANTHROPIC_API_KEY"
         if key_env in os.environ:
@@ -59,8 +74,8 @@ def init_command(args):
         value = getattr(args, key, None)
         if value is not None:
             setattr(config, key, value)
-    if config.llm_provider not in {"anthropic", "openai", "fake"}:
-        raise ValueError("LLM provider must be anthropic, openai or fake")
+    if config.llm_provider not in PROVIDERS:
+        raise ValueError(f"Unknown LLM provider {config.llm_provider!r}: choose one of {', '.join(PROVIDERS)}")
     save_config(config)
     print(json.dumps(masked_config(config), indent=2))
     return 0
