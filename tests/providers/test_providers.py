@@ -339,6 +339,59 @@ def test_managed_provision_failure():
     provider.destroy.assert_not_called()
 
 
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_signals_deferred_during_delete(signum):
+    provider = Mock()
+    provider.provision.return_value = Instance("42", "test", "pending")
+    provider.destroy.side_effect = lambda instance_id: os.kill(os.getpid(), signum)
+    previous = signal.getsignal(signum)
+    expected = KeyboardInterrupt if signum == signal.SIGINT else SystemExit
+    with pytest.raises(expected):
+        with managed_instance(provider):
+            pass
+    provider.destroy.assert_called_once_with("42")
+    assert signal.getsignal(signum) == previous
+
+
+@responses.activate
+@pytest.mark.parametrize("delete_status", [204, 500])
+def test_runpod_invalid_create_details_cleanup(key, delete_status):
+    provider = RunPodProvider(api_key="test-key", ssh_key_path=key)
+    responses.post(provider.api_url + "/pods", json={
+        "id": "42", "ssh": {"direct": {"port": "invalid"}}})
+    responses.delete(provider.api_url + "/pods/42", status=delete_status)
+    with pytest.raises(ProviderError) as error:
+        provider.provision()
+    assert responses.calls[-1].request.method == "DELETE"
+    if delete_status == 500:
+        assert "cyoai destroy 42 --provider runpod" in str(error.value)
+    else:
+        assert "instance was deleted" in str(error.value)
+
+
+@responses.activate
+def test_vast_attach_and_delete_failure_guidance(key):
+    provider = VastProvider(api_key="test-key", ssh_key_path=key)
+    responses.post(provider.api_url + "/bundles/", json={"offers": [{"id": 1, "dph_total": 1}]})
+    responses.put(provider.api_url + "/asks/1/", json={"new_contract": 42})
+    responses.post(provider.api_url + "/instances/42/ssh/", status=500)
+    responses.delete(provider.api_url + "/instances/42/", status=401)
+    with pytest.raises(ProviderError, match="cyoai destroy 42 --provider vast"):
+        provider.provision()
+
+
+@responses.activate
+@pytest.mark.parametrize("detail", ["Authorization: Basic encoded-secret", "Bearer encoded-secret",
+                                  "-----BEGIN OPENSSH PRIVATE KEY-----\\nprivate-material"])
+def test_runpod_error_drops_sensitive_details(detail):
+    provider = RunPodProvider(api_key="test-key")
+    responses.get(provider.api_url + "/pods", status=500, json={"detail": detail})
+    with pytest.raises(ProviderError) as error:
+        provider.list_instances()
+    assert detail not in str(error.value)
+    assert "HTTP 500" in str(error.value)
+
+
 def test_managed_sigterm():
     previous = signal.getsignal(signal.SIGTERM)
     provider = Mock()
@@ -373,7 +426,7 @@ def test_ssh_exec(key, remote):
 @pytest.mark.parametrize("remote_path", ["/workspace/", "/workspace with spaces/"])
 def test_ssh_sync_commands(key, remote, rsync, remote_path):
     with patch("cyoai.providers.ssh.shutil.which", return_value="/bin/rsync" if rsync else None), \
-            patch("cyoai.providers.ssh.subprocess.run") as run:
+            patch("cyoai.providers.ssh.stream_process", return_value=iter(())) as run:
         ssh.sync_up(remote, "workspace/", remote_path, key)
         ssh.sync_down(remote, remote_path + "results.tsv", "results.tsv", key)
     upload, download = [call.args[0] for call in run.call_args_list]
@@ -391,7 +444,7 @@ def test_ssh_sync_commands(key, remote, rsync, remote_path):
         assert "StrictHostKeyChecking=accept-new" in transport
         assert "IdentitiesOnly=yes" in transport
         assert f'UserKnownHostsFile="{ssh.known_hosts_path(remote)}"' in transport
-    assert all(call.kwargs["check"] for call in run.call_args_list)
+    assert all(call.args[1] is remote for call in run.call_args_list)
 
 
 def test_known_hosts_isolation_and_permissions(key, remote):
@@ -498,7 +551,7 @@ def test_stream_process_early_close():
 
 
 def test_transfer_error(key, remote):
-    with patch("cyoai.providers.ssh.subprocess.run", side_effect=OSError("missing")):
+    with patch("cyoai.providers.ssh.stream_process", side_effect=ProviderError("missing")):
         with pytest.raises(ProviderError, match="transfer failed"):
             ssh.sync_up(remote, "local", "remote", key)
 

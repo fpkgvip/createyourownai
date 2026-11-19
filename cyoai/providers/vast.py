@@ -40,7 +40,13 @@ class VastProvider(HTTPProvider):
         try:
             self._request("POST", f"/instances/{instance_id}/ssh/", json={"ssh_key": key})
         except BaseException:
-            self.destroy(str(instance_id))
+            try:
+                self.destroy(str(instance_id))
+            except Exception as exc:
+                raise ProviderError(
+                    f"{exc}. Instance {instance_id} may still be running; "
+                    f"clean up with: cyoai destroy {instance_id} --provider vast"
+                ) from None
             raise
         return Instance(str(instance_id), self.name, "pending", gpu=offer.get("gpu_name"),
                         cost_per_hr=offer.get("dph_total"), raw=result)
