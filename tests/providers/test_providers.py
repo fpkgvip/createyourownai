@@ -370,16 +370,19 @@ def test_ssh_exec(key, remote):
 
 
 @pytest.mark.parametrize("rsync", [True, False])
-def test_ssh_sync_commands(key, remote, rsync):
+@pytest.mark.parametrize("remote_path", ["/workspace/", "/workspace with spaces/"])
+def test_ssh_sync_commands(key, remote, rsync, remote_path):
     with patch("cyoai.providers.ssh.shutil.which", return_value="/bin/rsync" if rsync else None), \
             patch("cyoai.providers.ssh.subprocess.run") as run:
-        ssh.sync_up(remote, "workspace/", "/workspace/", key)
-        ssh.sync_down(remote, "/workspace/results.tsv", "results.tsv", key)
+        ssh.sync_up(remote, "workspace/", remote_path, key)
+        ssh.sync_down(remote, remote_path + "results.tsv", "results.tsv", key)
     upload, download = [call.args[0] for call in run.call_args_list]
-    assert upload[-2:] == ["workspace/", "root@host:/workspace/"]
-    assert download[-2:] == ["root@host:/workspace/results.tsv", "results.tsv"]
+    assert upload[-2:] == ["workspace/", f"root@host:{remote_path}"]
+    assert download[-2:] == [f"root@host:{remote_path}results.tsv", "results.tsv"]
     assert upload[0] == ("rsync" if rsync else "scp")
     if rsync:
+        assert "--protect-args" in upload
+        assert "--protect-args" in download
         assert "-p 2222" in upload[upload.index("-e") + 1]
     else:
         assert upload[upload.index("-P") + 1] == "2222"

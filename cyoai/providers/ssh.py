@@ -89,10 +89,10 @@ def _sync(instance, source, destination, path, upload):
     opts = options(instance, path)
     if shutil.which("rsync"):
         transport = shlex.join(["ssh", *opts, "-p", str(instance.ssh_port)])
-        remote = shlex.quote(str(destination if upload else source))
+        remote = str(destination if upload else source)
         src = str(source) if upload else f"{host}:{remote}"
         dst = f"{host}:{remote}" if upload else str(destination)
-        args = ["rsync", "-az", "-e", transport, "--", src, dst]
+        args = ["rsync", "-az", "--protect-args", "-e", transport, "--", src, dst]
     else:
         src = str(source) if upload else f"{host}:{source}"
         dst = f"{host}:{destination}" if upload else str(destination)
