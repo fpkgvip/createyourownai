@@ -193,7 +193,7 @@ def instances_command(args):
                 if args.command == "destroy":
                     provider.destroy(instance.id)
                 else:
-                    print(f"{name}\t{instance}")
+                    print(f"{name}\t{instance.id}\t{instance.status}\t{instance.gpu or ''}")
     return 0
 
 

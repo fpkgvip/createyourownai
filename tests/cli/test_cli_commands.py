@@ -146,3 +146,15 @@ def test_inference_uv_fallback(tmp_path, monkeypatch):
     assert command[:5] == ["uv", "run", "--extra", "cpu", "python"]
     assert "--prompt" in command
     assert "--max-new-tokens" in command
+
+
+def test_status_does_not_print_raw(monkeypatch, capsys):
+    instance = types.SimpleNamespace(id="safe-id", status="running", gpu="safe-gpu",
+                                     raw={"env": {"API_KEY": "must-not-print"}})
+    provider = types.SimpleNamespace(list_instances=lambda: [instance])
+    save_config(Config(runpod_api_key="test-key"))
+    monkeypatch.setattr(cli, "get_provider", lambda *args: provider)
+    assert cli.main(["status", "--provider", "runpod"]) == 0
+    output = capsys.readouterr().out
+    assert output == "runpod\tsafe-id\trunning\tsafe-gpu\n"
+    assert "must-not-print" not in output and "API_KEY" not in output
