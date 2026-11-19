@@ -2,10 +2,12 @@
 
 `cyoai` wraps [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) in a CLI. Describe a training goal, bring your own LLM API key, and let a research agent try edits to the training script. Then run your best checkpoint on your own machine.
 
-## Five-minute quickstart
+## Quickstart: generate text on CPU
 
-Install Python 3.10+, [uv](https://docs.astral.sh/uv/getting-started/installation/),
-and Git, then:
+Use a Bash-compatible shell on Linux or macOS, with Python 3.10+,
+[uv](https://docs.astral.sh/uv/getting-started/installation/) and Git on your
+PATH. You'll need internet access and a few GB of free disk space for the CPU
+run. No API key or GPU is needed.
 
 ```bash
 git clone https://github.com/fpkgvip/createyourownai.git
@@ -14,24 +16,31 @@ uv sync
 uv run cyoai train "Try a smaller learning rate" --provider local --max-iters 2 --dry-run
 ```
 
-The dry run exercises the loop with simulated scores. It does not need an API
-key, a GPU, or training data. Its checkpoint files are placeholders.
+The dry run exercises the loop with simulated scores. It doesn't download
+training data or produce a model you can run.
 
-To train a real CPU baseline without a paid LLM or agent edits, set
-`CYOAI_LLM_PROVIDER=fake` and run in smoke mode. The first run downloads
-training data and model dependencies:
+Next, train a real CPU baseline with no LLM calls or agent edits. The first
+run downloads PyTorch and two public Hugging Face data shards (about 180 MiB
+for the data alone). The three-second training budget does not include setup,
+evaluation, or saving the checkpoint.
 
 ```bash
 CYOAI_LLM_PROVIDER=fake uv run cyoai train "Train a tiny baseline" \
   --provider local --smoke --device cpu --budget-mins 0.05 --max-iters 0
-uv run cyoai run runs/RUN_ID/best --prompt "Once upon a time"
 ```
 
-Replace `RUN_ID` with the ID printed by `cyoai train`. A run trains the baseline
-before trying up to `--max-iters` edits. The best model, tokenizer, and
-architecture snapshot stay together in `best/`; `results.tsv` records validation
-bits per byte (`val_bpb`, lower is better). Omit `--prompt` for an interactive
-session; type `exit` to quit.
+After training succeeds, generate a short continuation:
+
+```bash
+uv run cyoai run --latest --prompt "Once upon a time" --max-tokens 32
+```
+
+`--max-iters 0` trains only the baseline. `--latest` loads the newest trained
+checkpoint under `runs/`, skipping dry runs. To select a specific run or use
+a custom `--workdir`, pass the `best/` path printed after `artifacts:` instead
+of `--latest`. The model, tokenizer, and architecture snapshot stay together
+in `best/`; `results.tsv` records validation bits per byte (`val_bpb`, lower
+is better). Omit `--prompt` for an interactive session; type `exit` to quit.
 
 For LLM-driven experiments, run `uv run cyoai init` to choose OpenAI or
 Anthropic and configure your key. Use `--provider local` for local training or
@@ -43,7 +52,8 @@ quality.
 
 ## Train on a cloud GPU
 
-Choose `runpod` or `vast`, set its API key, and install OpenSSH. Have an SSH
+Choose `runpod` or `vast`, export `RUNPOD_API_KEY` or `VAST_API_KEY` respectively
+(or save the key with `uv run cyoai init`), and install OpenSSH. Have an SSH
 keypair with the matching `.pub` file. Set `CYOAI_SSH_KEY` to the private key
 path if you do not use a default key from `~/.ssh`. File transfers use rsync
 when available or scp otherwise. Cloud GPU time and LLM calls can cost money.
@@ -71,7 +81,8 @@ Cloud provisioning and teardown have mock coverage; live GPU rentals are unverif
 - The research agent sends the training goal and workspace context to the LLM
   provider. It runs generated Python without sandboxing.
   Run it in an isolated environment without unrelated credentials or sensitive files.
-  Only load checkpoints you trust.
+  Only load checkpoints you trust, including the contents of `runs/` when
+  using `--latest`.
 
 ## Tests
 
