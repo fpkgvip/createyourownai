@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 import sys
 import threading
 import time
@@ -232,3 +233,60 @@ def test_remote_hard_timeout(workspace, monkeypatch):
         assert "timeout --signal=TERM --kill-after=5s 0.1s env" in commands[0]
     finally:
         release.set()
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("existing", [False, True])
+def test_artifact_copy_failure_preserves_best(workspace, monkeypatch, remote, existing):
+    best = workspace / "best"
+    if existing:
+        best.mkdir()
+        (best / "model.pt").write_text("original")
+        (best / "extra").write_text("also preserved")
+    calls = []
+    def copy(source, destination):
+        calls.append(source)
+        Path(destination).write_text("new")
+        if len(calls) == 2:
+            raise OSError("copy failed")
+    if remote:
+        class Provider:
+            def sync_down(self, instance, source, destination): copy(source, destination)
+        runner = RemoteRunner(Provider(), "id", "/work", workspace)
+    else:
+        monkeypatch.setattr(runners.shutil, "copy2", copy)
+        runner = LocalRunner(workspace)
+    with pytest.raises(OSError, match="copy failed"):
+        runner.keep()
+    if existing:
+        assert {p.name: p.read_text() for p in best.iterdir()} == {
+            "model.pt": "original", "extra": "also preserved"}
+    else:
+        assert not best.exists()
+    assert not list(workspace.glob(".best-*"))
+
+
+def test_artifact_swap_failure_rolls_back(workspace, monkeypatch):
+    best = workspace / "best"
+    best.mkdir()
+    (best / "model.pt").write_text("original")
+    rename = Path.rename
+    def fail_publish(source, target):
+        if source.name == "next":
+            raise OSError("rename failed")
+        return rename(source, target)
+    monkeypatch.setattr(Path, "rename", fail_publish)
+    with pytest.raises(OSError, match="rename failed"):
+        with runners.staged_best(workspace) as staging:
+            (staging / "model.pt").write_text("new")
+    assert (best / "model.pt").read_text() == "original"
+    assert not list(workspace.glob(".best-*"))
+
+
+def test_artifact_swap_replaces_complete_directory(workspace):
+    (workspace / "best").mkdir()
+    (workspace / "best/old").write_text("old")
+    with runners.staged_best(workspace) as staging:
+        (staging / "new").write_text("new")
+    assert [p.name for p in (workspace / "best").iterdir()] == ["new"]
+    assert not list(workspace.glob(".best-*"))

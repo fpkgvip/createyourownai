@@ -1,4 +1,5 @@
 import fnmatch
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import queue
@@ -7,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import tempfile
 import time
 
 
@@ -57,6 +59,24 @@ def scrub_env(env):
             if not any(fnmatch.fnmatch(key.upper(), pattern) for pattern in patterns)}
 
 
+@contextmanager
+def staged_best(workspace):
+    best = workspace / "best"
+    with tempfile.TemporaryDirectory(dir=workspace, prefix=".best-", ignore_cleanup_errors=True) as directory:
+        staging = Path(directory) / "next"
+        previous = Path(directory) / "previous"
+        staging.mkdir()
+        yield staging
+        try:
+            if best.exists():
+                best.rename(previous)
+            staging.rename(best)
+        except BaseException:
+            if previous.exists():
+                previous.rename(best)
+            raise
+
+
 class LocalRunner:
     def __init__(self, workspace, budget_secs=300, cmd=None, extra_env=None, log=print):
         self.workspace, self.budget_secs = Path(workspace), budget_secs
@@ -96,10 +116,9 @@ class LocalRunner:
             process.stdout.close()
 
     def keep(self):
-        best = self.workspace / "best"
-        best.mkdir(exist_ok=True)
-        for name in ("model.pt", "tokenizer.pkl", "train.py", "metrics.json"):
-            shutil.copy2(self.workspace / "out" / name, best / name)
+        with staged_best(self.workspace) as staging:
+            for name in ("model.pt", "tokenizer.pkl", "train.py", "metrics.json"):
+                shutil.copy2(self.workspace / "out" / name, staging / name)
 
 
 class RemoteRunner:
@@ -131,10 +150,9 @@ class RemoteRunner:
         return 0, "".join(lines)
 
     def keep(self):
-        best = self.workspace / "best"
-        best.mkdir(exist_ok=True)
-        for name in ("model.pt", "tokenizer.pkl", "train.py", "metrics.json"):
-            self.provider.sync_down(self.instance, self.remote_dir + "/out/" + name, best / name)
+        with staged_best(self.workspace) as staging:
+            for name in ("model.pt", "tokenizer.pkl", "train.py", "metrics.json"):
+                self.provider.sync_down(self.instance, self.remote_dir + "/out/" + name, staging / name)
 
 
 class FakeRunner:
