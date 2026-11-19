@@ -90,10 +90,25 @@ def load_model(path, device=None):
     the selected architecture source and any snapshot loading error.
     """
     path = Path(path).expanduser().resolve()
+    if path.is_dir() and not (path / "model.pt").is_file() and (path / "best").is_dir():
+        path = path / "best"
     checkpoint_path = path / "model.pt" if path.is_dir() else path
     out = checkpoint_path.parent
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}. Pass a run directory, checkpoint directory, or model.pt.")
+    tokenizer_path = out / "tokenizer.pkl"
+    if not tokenizer_path.is_file():
+        raise FileNotFoundError(f"Tokenizer not found: {tokenizer_path}. Restore tokenizer.pkl from the same training checkpoint; model.pt alone is not sufficient.")
+    try:
+        with tokenizer_path.open("rb") as handle:
+            tokenizer = pickle.load(handle)
+    except Exception as exc:
+        raise ValueError(f"Could not load tokenizer: {tokenizer_path}. Restore tokenizer.pkl from the same training checkpoint (dry-run artifacts cannot generate text).") from exc
     device = torch.device(device) if device is not None else get_device()
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise ValueError(f"Could not read checkpoint: {checkpoint_path}. Use a real training checkpoint, not a dry-run artifact.") from exc
     snapshot = out / "train.py"
     fallback = Path(__file__).with_name("train.py")
     snapshot_error = None
@@ -107,11 +122,9 @@ def load_model(path, device=None):
             break
         except Exception as exc:
             if source == fallback:
-                raise RuntimeError(f"Could not load architecture from {snapshot} or {fallback}") from exc
+                raise RuntimeError(f"Could not load architecture from {snapshot} or {fallback}. Restore the original train.py saved with this checkpoint. Last error: {exc}") from exc
             snapshot_error = f"{type(exc).__name__}: {exc}"
-            warnings.warn(f"Snapshot failed ({snapshot_error}); trying vendored train.py", RuntimeWarning)
-    with (out / "tokenizer.pkl").open("rb") as handle:
-        tokenizer = pickle.load(handle)
+            warnings.warn(f"Snapshot failed: {snapshot} is missing or incompatible with this checkpoint; trying bundled train.py. Restore the original snapshot if this was unintended.", RuntimeWarning)
     info = {k: v for k, v in checkpoint.items() if k != "state_dict"}
     info.update(source=str(source), snapshot_error=snapshot_error, device=str(device))
     return model, tokenizer, info
@@ -157,10 +170,10 @@ def generate(model, tokenizer, prompt, max_new_tokens=200, temperature=0.8, top_
 def repl(model, tokenizer, **generation_kwargs):
     while True:
         try:
-            prompt = input("> ")
+            prompt = input("You> ")
         except (EOFError, KeyboardInterrupt):
             break
-        if not prompt.strip() or prompt.strip() == "exit":
+        if not prompt.strip() or prompt.strip().lower() in {"exit", "quit", "/exit"}:
             break
         generate(model, tokenizer, prompt, stream=lambda text: print(text, end="", flush=True), **generation_kwargs)
         print()
@@ -178,7 +191,11 @@ def main():
     args = parser.parse_args()
     if args.seed is not None:
         torch.manual_seed(args.seed)
-    model, tokenizer, _ = load_model(args.path, args.device)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        model, tokenizer, _ = load_model(args.path, args.device)
+    for warning in caught:
+        print(f"cyoai: warning: {warning.message}", file=sys.stderr)
     if next(model.parameters()).device.type == "cpu":
         torch.set_num_threads(min(4, os.cpu_count() or 1))
     kwargs = dict(max_new_tokens=args.max_new_tokens, temperature=args.temperature, top_k=args.top_k)
@@ -189,4 +206,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Interrupted", file=sys.stderr)
+        sys.exit(130)
+    except Exception as exc:
+        print(f"cyoai: {exc}", file=sys.stderr)
+        sys.exit(1)

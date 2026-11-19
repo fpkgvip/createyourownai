@@ -10,6 +10,7 @@ import shlex
 import sys
 import subprocess
 import tempfile
+import warnings
 
 from cyoai.config import Config, load_config, masked_config, save_config
 from cyoai.agent.llm import FakeLLM, make_llm
@@ -136,6 +137,8 @@ def is_dry_run_model(path):
 
 
 def chat_command(args):
+    if args.max_tokens < 0 or args.temperature < 0 or args.top_k < 0:
+        raise ValueError("max-tokens, temperature, and top-k must be non-negative")
     if args.path is None:
         for model in sorted(Path("runs").glob("*/best/model.pt"), reverse=True):
             if (model.is_file() and (model.parent / "tokenizer.pkl").is_file()
@@ -146,6 +149,8 @@ def chat_command(args):
             raise ValueError("No trained checkpoint found under runs/. Pass a checkpoint path or train without --dry-run.")
     else:
         path = Path(args.path).expanduser()
+        if path.is_dir() and not (path / "model.pt").is_file() and (path / "best").is_dir():
+            path = path / "best"
         model_path = path / "model.pt" if path.is_dir() else path
         if not model_path.is_file():
             raise FileNotFoundError(f"Checkpoint not found: {model_path}")
@@ -172,7 +177,11 @@ def chat_command(args):
         raise RuntimeError("Local inference is unavailable; install cyoai[train] with core inference support") from exc
     if not hasattr(infer, "load_model") or not hasattr(infer, "generate"):
         raise RuntimeError("Core inference must expose load_model and generate")
-    model, tokenizer, _ = infer.load_model(path, device=args.device)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", RuntimeWarning)
+        model, tokenizer, _ = infer.load_model(path, device=args.device)
+    for warning in caught:
+        print(f"cyoai: warning: {warning.message}", file=sys.stderr)
     def generate(prompt):
         print(infer.generate(model, tokenizer, prompt, max_new_tokens=args.max_tokens,
                              temperature=args.temperature, top_k=args.top_k))
@@ -184,7 +193,7 @@ def chat_command(args):
                 prompt = input("You> ")
             except EOFError:
                 break
-            if prompt.strip().lower() in {"exit", "quit", "/exit"}:
+            if not prompt.strip() or prompt.strip().lower() in {"exit", "quit", "/exit"}:
                 break
             generate(prompt)
     return 0
@@ -236,8 +245,8 @@ def parser():
     train.set_defaults(func=train_command)
     for name in ("run", "chat"):
         chat = subs.add_parser(name, help="Generate text from a trusted checkpoint")
-        checkpoint = chat.add_mutually_exclusive_group(required=name == "run")
-        checkpoint.add_argument("path", nargs="?", help="Trusted checkpoint directory or model.pt")
+        checkpoint = chat.add_mutually_exclusive_group()
+        checkpoint.add_argument("path", nargs="?", help="Trusted run directory, checkpoint directory, or model.pt (default: latest trained checkpoint)")
         checkpoint.add_argument("--latest", action="store_true",
                                 help="Use the newest trained checkpoint under the local runs/ directory")
         chat.add_argument("--prompt", help="Generate once; omit for an interactive prompt session")
