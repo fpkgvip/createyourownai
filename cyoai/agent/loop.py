@@ -53,7 +53,9 @@ class ResearchLoop:
         best = None
 
         def untracked():
-            return set(filter(None, git(workspace, "ls-files", "--others", "--exclude-standard", "-z").split("\0")))
+            paths = git(workspace, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+            artifacts = {"results.tsv", "run.log", "out", "best", ".venv", "__pycache__"}
+            return {name for name in paths if name and name.split("/", 1)[0] not in artifacts}
 
         existing_untracked = untracked()
         results = workspace / "results.tsv"

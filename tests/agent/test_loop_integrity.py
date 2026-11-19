@@ -10,7 +10,7 @@ import pytest
 from cyoai.agent.llm import FakeLLM
 from cyoai.agent.loop import ResearchLoop
 from cyoai.agent.runners import LocalRunner, RemoteRunner
-from cyoai.agent.workspace import create_workspace, git
+from cyoai.agent.workspace import create_workspace, git, initialize_git
 
 
 def reply(code, description="experiment"):
@@ -199,3 +199,37 @@ def test_training_cannot_commit_workspace_changes(workspace, change_source):
     with (workspace / "results.tsv").open() as stream:
         rows = list(csv.DictReader(stream, delimiter="\t"))
     assert [row["status"] for row in rows] == ["keep", "crash"]
+
+
+@pytest.mark.parametrize("initialize", [False, True])
+def test_loop_artifacts_do_not_require_gitignore(tmp_path, initialize):
+    workspace = tmp_path / "plain-workspace"
+    workspace.mkdir()
+    source = ("from pathlib import Path\n"
+              "out = Path('out')\nout.mkdir(exist_ok=True)\n"
+              "for name in ('model.pt', 'tokenizer.pkl', 'train.py', 'metrics.json'):\n"
+              "    (out / name).write_text('current checkpoint')\n"
+              "print('val_bpb: 2')\n")
+    (workspace / "train.py").write_text(source)
+    (workspace / "program.md").write_text("Minimize validation loss")
+    if initialize:
+        initialize_git(workspace)
+
+    def log(message):
+        with (workspace / "run.log").open("a") as stream:
+            stream.write(message + "\n")
+
+    runner = LocalRunner(workspace, cmd=f"{sys.executable} train.py", log=log)
+    replies = [reply(source), reply(source + "Path('unexpected.py').write_text('bad')\n")]
+    best = ResearchLoop(workspace, FakeLLM(replies), runner, 2, log=log).run()
+    assert best is not None
+    assert best.val_bpb == 2
+    with (workspace / "results.tsv").open() as stream:
+        rows = list(csv.DictReader(stream, delimiter="\t"))
+    assert [row["status"] for row in rows] == ["keep", "discard", "crash"]
+    assert git(workspace, "rev-parse", "HEAD") == best.commit
+    assert (workspace / "best/model.pt").read_text() == "current checkpoint"
+    assert (workspace / "out/model.pt").read_text() == "current checkpoint"
+    assert (workspace / "run.log").read_text()
+    assert not (workspace / "unexpected.py").exists()
+    assert not (workspace / ".gitignore").exists()
