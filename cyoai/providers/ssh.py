@@ -3,6 +3,7 @@ from pathlib import Path
 import shlex
 import shutil
 import subprocess
+from urllib.parse import quote
 
 from .errors import ProviderError
 
@@ -25,9 +26,27 @@ def public_key(path=None):
         raise ProviderError("Cannot read SSH public key (.pub)") from exc
 
 
-def options(path=None):
-    return ["-i", str(key_path(path)), "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null", "-o", "BatchMode=yes",
+def known_hosts_path(instance):
+    filename = f"{quote(instance.provider, safe='')}-{quote(str(instance.id), safe='')}"
+    return Path.home() / ".cache" / "cyoai" / "known_hosts" / filename
+
+
+def cleanup_known_hosts(instance):
+    try:
+        known_hosts_path(instance).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def options(instance, path=None):
+    hosts = known_hosts_path(instance)
+    try:
+        hosts.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        hosts.parent.chmod(0o700)
+    except OSError as exc:
+        raise ProviderError("Cannot create SSH known-hosts directory") from exc
+    return ["-i", str(key_path(path)), "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f'UserKnownHostsFile="{hosts}"', "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=30"]
 
 
@@ -61,13 +80,13 @@ def stream_process(args):
 
 def exec_stream(instance, command, ssh_key_path=None):
     host = target(instance)
-    return stream_process(["ssh", *options(ssh_key_path), "-p", str(instance.ssh_port),
+    return stream_process(["ssh", *options(instance, ssh_key_path), "-p", str(instance.ssh_port),
                            host, command])
 
 
 def _sync(instance, source, destination, path, upload):
     host = target(instance)
-    opts = options(path)
+    opts = options(instance, path)
     if shutil.which("rsync"):
         transport = shlex.join(["ssh", *opts, "-p", str(instance.ssh_port)])
         remote = shlex.quote(str(destination if upload else source))

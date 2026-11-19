@@ -1,6 +1,8 @@
 import io
 import json
 import os
+from pathlib import Path
+import shlex
 import signal
 from unittest.mock import Mock, patch
 
@@ -13,6 +15,11 @@ from cyoai.providers import (
     RunPodProvider, VastProvider, get_provider, managed_instance,
 )
 from cyoai.providers import ssh
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
 
 
 @pytest.fixture
@@ -357,8 +364,8 @@ def test_ssh_exec(key, remote):
     with patch("cyoai.providers.ssh.subprocess.Popen", return_value=process) as popen:
         assert list(ssh.exec_stream(remote, "echo hello", key)) == ["hello\n", "world\n"]
     args = popen.call_args.args[0]
-    assert args == ["ssh", "-i", key, "-o", "StrictHostKeyChecking=no", "-o",
-                    "UserKnownHostsFile=/dev/null", "-o", "BatchMode=yes", "-o",
+    assert args == ["ssh", "-i", key, "-o", "StrictHostKeyChecking=accept-new", "-o",
+                    f'UserKnownHostsFile="{ssh.known_hosts_path(remote)}"', "-o", "BatchMode=yes", "-o",
                     "ConnectTimeout=30", "-p", "2222", "root@host", "echo hello"]
 
 
@@ -376,7 +383,73 @@ def test_ssh_sync_commands(key, remote, rsync):
         assert "-p 2222" in upload[upload.index("-e") + 1]
     else:
         assert upload[upload.index("-P") + 1] == "2222"
+    for command in (upload, download):
+        transport = shlex.split(command[command.index("-e") + 1]) if rsync else command
+        assert "StrictHostKeyChecking=accept-new" in transport
+        assert f'UserKnownHostsFile="{ssh.known_hosts_path(remote)}"' in transport
     assert all(call.kwargs["check"] for call in run.call_args_list)
+
+
+def test_known_hosts_isolation_and_permissions(key, remote):
+    expected = Path.home() / ".cache" / "cyoai" / "known_hosts" / "test-42"
+    assert ssh.known_hosts_path(remote) == expected
+    ssh.options(remote, key)
+    assert expected.parent.stat().st_mode & 0o777 == 0o700
+    expected.write_text("trusted host key\n")
+    expected.parent.chmod(0o755)
+    ssh.options(remote, key)
+    assert expected.parent.stat().st_mode & 0o777 == 0o700
+    assert expected.read_text() == "trusted host key\n"
+    reused_ip = Instance("43", "test", "running", ssh_host="host", ssh_port=2222)
+    other_provider = Instance("42", "other", "running", ssh_host="host", ssh_port=2222)
+    assert len({ssh.known_hosts_path(item) for item in (remote, reused_ip, other_provider)}) == 3
+    assert not ssh.known_hosts_path(reused_ip).exists()
+    unsafe = Instance("../../escape", "../provider", "running")
+    assert ssh.known_hosts_path(unsafe).parent == expected.parent
+
+
+@pytest.mark.parametrize("failure", [None, ValueError, KeyboardInterrupt])
+def test_managed_known_hosts_cleanup(key, remote, failure):
+    provider = Mock()
+    provider.provision.return_value = remote
+    provider.wait_ready.return_value = remote
+    ssh.options(remote, key)
+    hosts = ssh.known_hosts_path(remote)
+    hosts.write_text("trusted host key")
+
+    def use():
+        with managed_instance(provider):
+            assert hosts.exists()
+            if failure:
+                raise failure()
+
+    if failure:
+        with pytest.raises(failure):
+            use()
+    else:
+        use()
+    assert not hosts.exists()
+    ssh.cleanup_known_hosts(remote)
+
+
+def test_known_hosts_kept_on_destroy_failure(key, remote):
+    provider = Mock()
+    provider.provision.return_value = remote
+    provider.wait_ready.return_value = remote
+    provider.destroy.side_effect = ProviderError("destroy failed")
+    ssh.options(remote, key)
+    hosts = ssh.known_hosts_path(remote)
+    hosts.write_text("trusted host key")
+    with pytest.raises(ProviderError, match="destroy failed"):
+        with managed_instance(provider):
+            pass
+    assert hosts.exists()
+
+
+def test_known_hosts_directory_failure(key, remote):
+    with patch("pathlib.Path.mkdir", side_effect=PermissionError):
+        with pytest.raises(ProviderError, match="known-hosts directory"):
+            ssh.options(remote, key)
 
 
 def test_ssh_key_selection(key, monkeypatch, tmp_path):

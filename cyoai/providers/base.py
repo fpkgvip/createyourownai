@@ -87,6 +87,7 @@ def managed_instance(provider, **provision_kwargs):
         try:
             if instance is not None:
                 provider.destroy(instance.id)
+                ssh.cleanup_known_hosts(instance)
         finally:
             if install_signal:
                 signal.signal(signal.SIGTERM, previous)

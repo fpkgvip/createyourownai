@@ -9,7 +9,10 @@ Cloud constructors accept `api_key=None`, `ssh_key_path=None`, and an injectable
 SSH uses the explicit key, `CYOAI_SSH_KEY`, `~/.ssh/id_ed25519`, then `id_rsa`.
 The matching `.pub` file must exist before provisioning. Install OpenSSH and,
 preferably, rsync; otherwise transfers use recursive scp. Host-key verification
-is disabled for disposable hosts. Custom images must run sshd on port 22 and
+uses `StrictHostKeyChecking=accept-new` (trust on first use), with a separate
+`~/.cache/cyoai/known_hosts/<provider>-<instance-id>` file per instance in a 0700
+directory. Changed keys are rejected. Managed teardown removes the file after
+successful destruction. Custom images must run sshd on port 22 and
 support the provider's SSH-key setup. CUDA/PyTorch images are the defaults.
 
 ```python
