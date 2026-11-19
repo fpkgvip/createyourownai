@@ -29,7 +29,6 @@ def write_raw(tmp_path, text):
 @pytest.mark.parametrize("text, message", [
     ("{bad", "is not valid JSON (line 1, column 2)"),
     ("[1]", "must contain a JSON object"),
-    ('{"llm_provider": 5}', "llm_provider must be a string"),
 ])
 def test_broken_config_gives_clear_message(tmp_path, capsys, text, message):
     write_raw(tmp_path, text)
@@ -96,3 +95,39 @@ def test_interactive_rerun_keeps_existing_values(monkeypatch, tmp_path, capsys):
         assert value in text
     assert "sk-keep" not in capsys.readouterr().out
     assert stat.S_IMODE(config_file(tmp_path).stat().st_mode) == 0o600
+
+
+def test_wrong_type_field_is_ignored_with_warning(tmp_path, capsys):
+    write_raw(tmp_path, '{"llm_provider": 5, "runpod_api_key": "rp"}')
+    assert cli.main(["init", "--non-interactive", "--llm-provider", "fake"]) == 0
+    assert "llm_provider must be a string; ignoring it" in capsys.readouterr().err
+    assert '"rp"' in config_file(tmp_path).read_text()
+
+
+def test_symlinked_config_target_is_not_chmodded(tmp_path, capsys):
+    target = tmp_path / "other.json"
+    target.write_text('{"llm_provider": "fake"}')
+    target.chmod(0o644)
+    config_file(tmp_path).parent.mkdir(parents=True)
+    config_file(tmp_path).symlink_to(target)
+    from cyoai.config import load_config
+    assert load_config().llm_provider == "fake"
+    assert "run `chmod 600" in capsys.readouterr().err
+    assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+
+def test_interactive_invalid_saved_provider_uses_flag(monkeypatch, tmp_path):
+    write_raw(tmp_path, '{"llm_provider": "bogus"}')
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "")
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "")
+    assert cli.main(["init", "--llm-provider", "fake"]) == 0
+    assert '"llm_provider": "fake"' in config_file(tmp_path).read_text()
+
+
+def test_interactive_base_url_can_be_cleared(monkeypatch, tmp_path):
+    save_config(Config(llm_provider="openai", llm_api_key="k", llm_base_url="https://x.test"))
+    answers = iter(["", "", "-"])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(answers))
+    monkeypatch.setattr(getpass, "getpass", lambda prompt="": "")
+    assert cli.main(["init"]) == 0
+    assert '"llm_base_url": null' in config_file(tmp_path).read_text()

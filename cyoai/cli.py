@@ -42,19 +42,21 @@ def managed_instance(provider, **kwargs):
 def init_command(args):
     config = load_config()
     if not args.non_interactive:
+        config_provider = config.llm_provider
         try:
-            previous = config.llm_provider
+            previous = (args.llm_provider or config.llm_provider).strip().lower()
             provider = input(f"LLM provider ({', '.join(PROVIDERS)}) [{previous}]: ").strip().lower()
             config.llm_provider = provider or previous
             if config.llm_provider not in PROVIDERS:
                 raise ValueError(f"Unknown LLM provider {config.llm_provider!r}: "
                                  f"choose one of {', '.join(PROVIDERS)}")
-            default = config.llm_model if config.llm_provider == previous else DEFAULT_MODELS[config.llm_provider]
+            default = (config.llm_model if config.llm_provider == config_provider
+                       else DEFAULT_MODELS[config.llm_provider])
             config.llm_model = input(f"Model [{default}]: ").strip() or default
             config.llm_api_key = getpass.getpass("LLM API key (blank to keep): ") or config.llm_api_key
             current_url = config.llm_base_url or ""
-            base_url = input(f"OpenAI-compatible base URL (optional) [{current_url}]: ").strip()
-            config.llm_base_url = base_url or config.llm_base_url
+            base_url = input(f"OpenAI-compatible base URL (optional, '-' to clear) [{current_url}]: ").strip()
+            config.llm_base_url = None if base_url == "-" else base_url or config.llm_base_url
             config.runpod_api_key = getpass.getpass("RunPod API key (blank to keep): ") or config.runpod_api_key
             config.vast_api_key = getpass.getpass("Vast API key (blank to keep): ") or config.vast_api_key
         except EOFError:
