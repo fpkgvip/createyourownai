@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -14,6 +15,7 @@ sys.path.insert(0, str(CORE))
 from attention import flash_attn_func
 from checkpoint import save_checkpoint
 from device import get_device
+import prepare
 
 
 @dataclass
@@ -22,6 +24,30 @@ class Config:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_evaluation_steps_and_bpb(self):
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.zeros(1))
+                self.calls = 0
+
+            def forward(self, x, y, reduction):
+                self.calls += 1
+                return torch.ones_like(y, dtype=torch.float32)
+
+        for smoke, batch_size, expected_steps in [(True, 17, 1), (True, 2, 8), (False, 2, 8)]:
+            with self.subTest(smoke=smoke, batch_size=batch_size):
+                model = Model()
+                y = torch.ones(batch_size, 256, dtype=torch.long)
+                y[:, 0] = 0
+                batches = iter([(y, y, 1)] * expected_steps)
+                with patch.multiple(prepare, SMOKE=smoke, EVAL_TOKENS=4096, MAX_SEQ_LEN=256), \
+                     patch.object(prepare, "get_token_bytes", return_value=torch.tensor([0, 2])), \
+                     patch.object(prepare, "make_dataloader", return_value=batches):
+                    bpb = prepare.evaluate_bpb(model, None, batch_size)
+                self.assertEqual(model.calls, expected_steps)
+                self.assertAlmostEqual(bpb, 1 / (2 * math.log(2)))
+
     def test_attention_masks_and_grouped_heads(self):
         q = torch.zeros(1, 4, 2, 2)
         k = torch.zeros(1, 4, 1, 2)

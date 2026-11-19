@@ -357,6 +357,8 @@ def evaluate_bpb(model, tokenizer, batch_size):
     token_bytes = get_token_bytes(device=device)
     val_loader = make_dataloader(tokenizer, batch_size, MAX_SEQ_LEN, "val", device=device)
     steps = EVAL_TOKENS // (batch_size * MAX_SEQ_LEN)
+    if SMOKE:
+        steps = max(1, steps)
     total_nats = 0.0
     total_bytes = 0
     for _ in range(steps):
