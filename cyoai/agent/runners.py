@@ -122,6 +122,8 @@ class LocalRunner:
 
 
 class RemoteRunner:
+    cleanup_timeout_secs = 30
+
     def __init__(self, provider, instance, remote_dir, workspace, budget_secs=300, log=print, extra_env=None):
         self.provider, self.instance = provider, instance
         self.remote_dir, self.workspace = remote_dir, Path(workspace)
@@ -146,13 +148,22 @@ class RemoteRunner:
                 self.log(line.rstrip())
                 lines.append(line.rstrip() + "\n")
         except Exception as exc:
-            try:
-                for _ in self.provider.exec_stream(self.instance, "pkill -KILL -f '[t]rain.py' || true"):
-                    pass
-            except Exception:
-                self.log("Remote training cleanup failed")
+            self._cleanup()
             return 1, "".join(lines) + str(exc)
         return 0, "".join(lines)
+
+    def _cleanup(self):
+        timeout = self.cleanup_timeout_secs
+        command = f"timeout --signal=KILL {timeout}s pkill -KILL -f '[t]rain.py' || true"
+
+        def cleanup_stream():
+            yield from self.provider.exec_stream(self.instance, command)
+
+        try:
+            for _ in stream_until(cleanup_stream(), time.monotonic() + timeout):
+                pass
+        except Exception:
+            self.log("Remote training cleanup failed or timed out")
 
     def keep(self):
         with staged_best(self.workspace) as staging:

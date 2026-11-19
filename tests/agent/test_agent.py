@@ -267,6 +267,38 @@ def test_remote_timeout_drains_cleanup_before_return(workspace, monkeypatch, cle
         release.set()
 
 
+@pytest.mark.parametrize("hang_in_factory", [False, True])
+def test_remote_hanging_cleanup_has_deadline(workspace, monkeypatch, hang_in_factory):
+    release = threading.Event()
+    commands, logs = [], []
+
+    def hanging_stream():
+        yield "cleanup started"
+        release.wait(5)
+
+    class Provider:
+        def sync_up(self, *args): pass
+        def exec_stream(self, instance, command):
+            if "pkill" not in command:
+                raise RuntimeError("training failed")
+            commands.append(command)
+            if hang_in_factory:
+                release.wait(5)
+                return iter(())
+            return hanging_stream()
+
+    monkeypatch.setattr(RemoteRunner, "cleanup_timeout_secs", .05)
+    start = time.monotonic()
+    try:
+        code, output = RemoteRunner(Provider(), "id", "/work", workspace, log=logs.append).run()
+        assert code != 0 and "training failed" in output
+        assert time.monotonic() - start < 2
+        assert commands == ["timeout --signal=KILL 0.05s pkill -KILL -f '[t]rain.py' || true"]
+        assert "Remote training cleanup failed or timed out" in logs
+    finally:
+        release.set()
+
+
 @pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("existing", [False, True])
 def test_artifact_copy_failure_preserves_best(workspace, monkeypatch, remote, existing):
