@@ -80,7 +80,9 @@ class ResearchLoop:
                     exit_code, output = self.runner.run()
                     if exit_code:
                         raise RuntimeError(f"Training exited with code {exit_code}")
-                    if git(workspace, "diff", "HEAD", "--name-only") or untracked() - existing_untracked:
+                    if (git(workspace, "rev-parse", "HEAD") != candidate or
+                            git(workspace, "diff", candidate, "--name-only") or
+                            untracked() - existing_untracked):
                         raise ValueError("Training modified workspace source files")
                     value, memory = parse_metrics(output)
                     status = "keep" if best is None or value < best.val_bpb else "discard"

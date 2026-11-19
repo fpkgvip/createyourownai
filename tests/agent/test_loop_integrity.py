@@ -170,3 +170,32 @@ def test_rollback_preserves_preexisting_files(workspace, effect):
     assert ignored.read_bytes() == b"existing checkpoint"
     assert (workspace / "prepare.py").read_bytes() == prepare
     assert git(workspace, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("change_source", [False, True])
+def test_training_cannot_commit_workspace_changes(workspace, change_source):
+    original = git(workspace, "rev-parse", "HEAD")
+    prepare = (workspace / "prepare.py").read_bytes()
+
+    class Runner:
+        count = 0
+
+        def run(self):
+            self.count += 1
+            if self.count == 2:
+                if change_source:
+                    (workspace / "prepare.py").write_text("# committed by training\n")
+                    git(workspace, "add", "prepare.py")
+                git(workspace, "commit", "--allow-empty", "-m", "Unexpected training commit")
+                assert git(workspace, "diff", "HEAD", "--name-only") == ""
+            return 0, f"val_bpb: {3 - self.count}"
+
+    best = ResearchLoop(workspace, FakeLLM([reply("x = 1")]), Runner(), 1).run()
+    assert best.commit == original
+    assert best.val_bpb == 2
+    assert git(workspace, "rev-parse", "HEAD") == original
+    assert (workspace / "prepare.py").read_bytes() == prepare
+    assert git(workspace, "status", "--porcelain") == ""
+    with (workspace / "results.tsv").open() as stream:
+        rows = list(csv.DictReader(stream, delimiter="\t"))
+    assert [row["status"] for row in rows] == ["keep", "crash"]
