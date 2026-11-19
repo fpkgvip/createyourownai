@@ -51,13 +51,19 @@ class ResearchLoop:
             initialize_git(workspace)
         best_commit = git(workspace, "rev-parse", "HEAD")
         best = None
-        prepare = workspace / "prepare.py"
-        protected_prepare = prepare.read_bytes() if prepare.exists() else None
+
+        def untracked():
+            paths = git(workspace, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+            artifacts = {"results.tsv", "run.log", "out", "best", ".venv", "__pycache__"}
+            return {name for name in paths if name and name.split("/", 1)[0] not in artifacts}
+
+        existing_untracked = untracked()
         results = workspace / "results.tsv"
         if not results.exists():
             results.write_text("commit\tval_bpb\tmemory_gb\tstatus\tdescription\n")
         try:
             for iteration in range(self.max_iters + 1):
+                existing_files = set(filter(None, git(workspace, "ls-files", "--cached", "--others", "-z").split("\0")))
                 description = "baseline"
                 candidate = best_commit
                 try:
@@ -71,13 +77,15 @@ class ResearchLoop:
                         code, description = parse_proposal(self.llm.complete(system, prompt))
                         (workspace / "train.py").write_text(code)
                         git(workspace, "add", "train.py")
-                        git(workspace, "commit", "--allow-empty", "-m", description)
+                        git(workspace, "commit", "--only", "--allow-empty", "-m", description, "--", "train.py")
                         candidate = git(workspace, "rev-parse", "HEAD")
                     exit_code, output = self.runner.run()
                     if exit_code:
                         raise RuntimeError(f"Training exited with code {exit_code}")
-                    if (prepare.read_bytes() if prepare.exists() else None) != protected_prepare:
-                        raise ValueError("Training modified protected prepare.py")
+                    if (git(workspace, "rev-parse", "HEAD") != candidate or
+                            git(workspace, "diff", candidate, "--name-only") or
+                            untracked() - existing_untracked):
+                        raise ValueError("Training modified workspace source files")
                     value, memory = parse_metrics(output)
                     status = "keep" if best is None or value < best.val_bpb else "discard"
                     result = Result(candidate, value, memory, status, description)
@@ -89,7 +97,12 @@ class ResearchLoop:
                     self.log(f"Iteration {iteration} crashed: {exc}")
                     result = Result(candidate, float("inf"), 0.0, "crash", description)
                 finally:
+                    new_files = untracked() - existing_files
                     git(workspace, "reset", "--hard", best_commit)
+                    for name in new_files:
+                        path = workspace / name
+                        if path.is_file() or path.is_symlink():
+                            path.unlink()
                 with results.open("a") as handle:
                     description = result.description.replace("\t", " ").replace("\n", " ")
                     handle.write(f"{result.commit}\t{result.val_bpb}\t{result.memory_gb}\t{result.status}\t{description}\n")

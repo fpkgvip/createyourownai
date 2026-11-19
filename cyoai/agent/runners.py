@@ -88,6 +88,9 @@ class LocalRunner:
         self.cmd = cmd or ("uv run --extra cpu train.py" if cpu else "uv run train.py")
 
     def run(self):
+        out = self.workspace / "out"
+        if out.exists():
+            shutil.rmtree(out)
         env = scrub_env({**os.environ, **self.extra_env})
         env["CYOAI_TIME_BUDGET"] = str(int(self.budget_secs))
         env["CYOAI_OUT_DIR"] = str((self.workspace / "out").resolve())
@@ -143,7 +146,7 @@ class RemoteRunner:
         prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
         run = "uv run --extra cpu" if env.get("CYOAI_DEVICE") == "cpu" else "uv run"
         timeout = hard_timeout_secs(self.budget_secs)
-        command = (f"cd {shlex.quote(self.remote_dir)} && timeout --signal=TERM --kill-after=5s "
+        command = (f"cd {shlex.quote(self.remote_dir)} && rm -rf -- out && timeout --signal=TERM --kill-after=5s "
                    f"{timeout}s env {prefix} {run} train.py")
         try:
             stream = self.provider.exec_stream(self.instance, command)
@@ -182,7 +185,9 @@ class FakeRunner:
         self.iteration += 1
         output = f"val_bpb: {1 / self.iteration:.6f}\npeak_vram_mb: 0\n"
         self.log(output.rstrip())
-        (self.workspace / "checkpoint").write_text("Synthetic dry-run checkpoint; not a trained model.\n")
+        out = self.workspace / "out"
+        out.mkdir(exist_ok=True)
+        (out / "checkpoint").write_text("Synthetic dry-run checkpoint; not a trained model.\n")
         return 0, output
 
     def keep(self):
