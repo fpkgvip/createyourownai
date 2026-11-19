@@ -47,7 +47,7 @@ def options(instance, path=None):
         raise ProviderError("Cannot create SSH known-hosts directory") from exc
     return ["-i", str(key_path(path)), "-o", "StrictHostKeyChecking=accept-new",
             "-o", f'UserKnownHostsFile="{hosts}"', "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=30"]
+            "-o", "ConnectTimeout=30", "-o", "IdentitiesOnly=yes"]
 
 
 def target(instance):

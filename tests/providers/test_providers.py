@@ -366,7 +366,7 @@ def test_ssh_exec(key, remote):
     args = popen.call_args.args[0]
     assert args == ["ssh", "-i", key, "-o", "StrictHostKeyChecking=accept-new", "-o",
                     f'UserKnownHostsFile="{ssh.known_hosts_path(remote)}"', "-o", "BatchMode=yes", "-o",
-                    "ConnectTimeout=30", "-p", "2222", "root@host", "echo hello"]
+                    "ConnectTimeout=30", "-o", "IdentitiesOnly=yes", "-p", "2222", "root@host", "echo hello"]
 
 
 @pytest.mark.parametrize("rsync", [True, False])
@@ -389,6 +389,7 @@ def test_ssh_sync_commands(key, remote, rsync, remote_path):
     for command in (upload, download):
         transport = shlex.split(command[command.index("-e") + 1]) if rsync else command
         assert "StrictHostKeyChecking=accept-new" in transport
+        assert "IdentitiesOnly=yes" in transport
         assert f'UserKnownHostsFile="{ssh.known_hosts_path(remote)}"' in transport
     assert all(call.kwargs["check"] for call in run.call_args_list)
 
