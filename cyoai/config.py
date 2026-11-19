@@ -37,7 +37,7 @@ def _read_config_file(path: Path) -> dict:
         if not path.is_file():
             raise ConfigError(f"Config path {path} is not a file. {hint}")
         mode = stat.S_IMODE(path.stat().st_mode)
-        if mode & 0o077:
+        if mode & 0o077 and os.name != "nt":
             try:
                 if path.is_symlink() or path.stat().st_uid != os.getuid():
                     raise PermissionError
@@ -61,8 +61,10 @@ def _read_config_file(path: Path) -> dict:
     for f in fields(Config):
         value = data.get(f.name)
         if f.name in data and not (isinstance(value, str) or (value is None and f.name == "llm_base_url")):
-            print(f"cyoai: warning: config file {path}: {f.name} must be a string; ignoring it. "
-                  "Run `cyoai init` to fix it.", file=sys.stderr)
+            if f.name != "llm_model":
+                raise ConfigError(f"Config file {path}: {f.name} must be a string. {hint}")
+            print(f"cyoai: warning: config file {path}: llm_model must be a string; "
+                  "using the provider default. Run `cyoai init` to fix it.", file=sys.stderr)
             del data[f.name]
     return data
 

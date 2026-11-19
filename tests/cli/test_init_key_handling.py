@@ -97,11 +97,18 @@ def test_interactive_rerun_keeps_existing_values(monkeypatch, tmp_path, capsys):
     assert stat.S_IMODE(config_file(tmp_path).stat().st_mode) == 0o600
 
 
-def test_wrong_type_field_is_ignored_with_warning(tmp_path, capsys):
-    write_raw(tmp_path, '{"llm_provider": 5, "runpod_api_key": "rp"}')
-    assert cli.main(["init", "--non-interactive", "--llm-provider", "fake"]) == 0
-    assert "llm_provider must be a string; ignoring it" in capsys.readouterr().err
-    assert '"rp"' in config_file(tmp_path).read_text()
+@pytest.mark.parametrize("field", ["llm_provider", "llm_base_url", "llm_api_key", "runpod_api_key"])
+def test_wrong_type_credential_field_is_an_error(tmp_path, capsys, field):
+    write_raw(tmp_path, '{"%s": 5}' % field)
+    assert cli.main(["destroy", "--all"]) == 1
+    assert f"{field} must be a string" in capsys.readouterr().err
+
+
+def test_wrong_type_model_is_ignored_with_warning(tmp_path, capsys):
+    write_raw(tmp_path, '{"llm_provider": "fake", "llm_model": 5, "runpod_api_key": "rp"}')
+    assert cli.main(["init", "--non-interactive"]) == 0
+    assert "llm_model must be a string; using the provider default" in capsys.readouterr().err
+    assert '"llm_model": "fake"' in config_file(tmp_path).read_text()
 
 
 def test_symlinked_config_target_is_not_chmodded(tmp_path, capsys):
