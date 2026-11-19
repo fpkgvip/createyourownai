@@ -12,6 +12,9 @@ import tempfile
 import time
 
 
+DRY_RUN_ARTIFACT = b"Synthetic dry-run artifact, not a trained model.\n"
+
+
 def hard_timeout_secs(budget_secs):
     return 2 * budget_secs + 120
 
@@ -186,4 +189,4 @@ class FakeRunner:
         best = self.workspace / "best"
         best.mkdir(exist_ok=True)
         for name in ("model.pt", "tokenizer.pkl"):
-            (best / name).write_text("Synthetic dry-run artifact, not a trained model.\n")
+            (best / name).write_bytes(DRY_RUN_ARTIFACT)

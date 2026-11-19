@@ -51,13 +51,14 @@ def test_init_noninteractive(tmp_path, capsys, monkeypatch):
     assert "private-key" not in capsys.readouterr().out
 
 
-def test_train_dry_run(tmp_path):
+def test_train_dry_run(tmp_path, capsys):
     dest = tmp_path / "runs"
     assert cli.main(["train", "learn simple prose", "--dry-run", "--workdir", str(dest), "--max-iters", "2"]) == 0
     workspace, = dest.iterdir()
     assert len((workspace / "results.tsv").read_text().splitlines()) == 4
     assert (workspace / "best/model.pt").exists()
     assert (workspace / "best/tokenizer.pkl").exists()
+    assert "no trained model" in capsys.readouterr().out
 
 
 def test_init_provider_flag_with_env_key(monkeypatch):
@@ -119,6 +120,34 @@ def test_chat_one_shot(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.importlib, "import_module", lambda name: fake)
     assert cli.main(["run", str(tmp_path), "--prompt", "hello"]) == 0
     assert "generated:hello" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", [["run", "--latest"], ["chat"]])
+def test_inference_selects_latest_trained_checkpoint(tmp_path, monkeypatch, capsys, command):
+    monkeypatch.chdir(tmp_path)
+    for index in (1, 2):
+        checkpoint = tmp_path / f"runs/20000101-000000-00000{index}/best"
+        checkpoint.mkdir(parents=True)
+        (checkpoint / "model.pt").write_bytes(b"model")
+        (checkpoint / "tokenizer.pkl").write_bytes(b"tokenizer")
+    assert cli.main(["train", "later dry run", "--dry-run", "--max-iters", "0"]) == 0
+    fake = types.SimpleNamespace(load_model=lambda path, device: (path, None, {}),
+                                 generate=lambda model, tokenizer, prompt, **kwargs: str(model))
+    monkeypatch.setattr(cli.importlib, "import_module", lambda name: fake)
+    assert cli.main([*command, "--prompt", "hello"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == str(checkpoint.relative_to(tmp_path))
+
+
+def test_inference_rejects_dry_run_artifacts_without_loading_torch(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["train", "simulate", "--dry-run", "--max-iters", "0"]) == 0
+    (best,) = Path("runs").glob("*/best")
+    monkeypatch.setattr(cli.importlib, "import_module", lambda name: pytest.fail("loaded inference"))
+    assert cli.main(["run", "--latest", "--prompt", "hello"]) == 1
+    assert "No trained checkpoint found under runs/" in capsys.readouterr().err
+    for path in (best, best / "model.pt"):
+        assert cli.main(["run", str(path), "--prompt", "hello"]) == 1
+        assert "is a dry-run artifact" in capsys.readouterr().err
 
 
 def test_cli_errors(tmp_path):

@@ -105,7 +105,8 @@ def test_tiny_local_training_and_inference(cli, tmp_path):
     assert 0 < metrics["val_bpb"] < float("inf")
 
     prompt = "Once upon a time"
-    completion = cli("run", str(best), "--prompt", prompt, "--max-tokens", "16", timeout=120)
+    cli("train", "Simulate another experiment", "--provider", "local", "--max-iters", "2", "--dry-run")
+    completion = cli("run", "--latest", "--prompt", prompt, "--max-tokens", "32", timeout=120)
     assert completion.stdout.strip() not in {"", prompt}, completion.stderr
 
 

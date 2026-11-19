@@ -14,7 +14,7 @@ import tempfile
 from cyoai.config import Config, load_config, masked_config, save_config
 from cyoai.agent.llm import FakeLLM, make_llm
 from cyoai.agent.loop import ResearchLoop
-from cyoai.agent.runners import FakeRunner, LocalRunner, RemoteRunner, scrub_env
+from cyoai.agent.runners import DRY_RUN_ARTIFACT, FakeRunner, LocalRunner, RemoteRunner, scrub_env
 from cyoai.agent.workspace import create_workspace
 
 
@@ -123,19 +123,34 @@ def train_command(args):
     if best is None:
         print("No successful training run", file=sys.stderr)
         return 1
-    print(f"Best val_bpb: {best.val_bpb:.6f}; artifacts: {workspace / 'best'}")
+    if args.dry_run:
+        print(f"Dry run complete. Simulated results: {workspace / 'results.tsv'} (no trained model)")
+    else:
+        print(f"Best val_bpb: {best.val_bpb:.6f}; artifacts: {workspace / 'best'}")
     return 0
 
 
+def is_dry_run_model(path):
+    with path.open("rb") as model:
+        return model.read(len(DRY_RUN_ARTIFACT) + 1).replace(b"\r\n", b"\n") == DRY_RUN_ARTIFACT
+
+
 def chat_command(args):
-    path = Path(args.path) if args.path else None
-    if path is None:
-        candidates = sorted(Path("runs").glob("*/best/model.pt"))
-        if not candidates:
-            raise ValueError("No model found. Pass a checkpoint path or train a model first.")
-        path = candidates[-1].parent
-    if not path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {path}")
+    if args.path is None:
+        for model in sorted(Path("runs").glob("*/best/model.pt"), reverse=True):
+            if (model.is_file() and (model.parent / "tokenizer.pkl").is_file()
+                    and not is_dry_run_model(model)):
+                path = model.parent
+                break
+        else:
+            raise ValueError("No trained checkpoint found under runs/. Pass a checkpoint path or train without --dry-run.")
+    else:
+        path = Path(args.path).expanduser()
+        model_path = path / "model.pt" if path.is_dir() else path
+        if not model_path.is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {model_path}")
+        if is_dry_run_model(model_path):
+            raise ValueError(f"{path} is a dry-run artifact. Train without --dry-run to generate text.")
     try:
         infer = importlib.import_module("cyoai.core.infer")
     except ModuleNotFoundError as exc:
@@ -206,24 +221,30 @@ def parser():
         init.add_argument("--" + field.replace("_", "-"))
     init.set_defaults(func=init_command)
     train = subs.add_parser("train", help="Research a model for a goal")
-    train.add_argument("goal")
-    train.add_argument("--provider", choices=["local", "runpod", "vast"], default="local")
-    train.add_argument("--gpu")
-    train.add_argument("--budget-mins", type=float, default=5)
-    train.add_argument("--max-iters", type=int, default=5)
-    train.add_argument("--workdir", default="runs")
-    train.add_argument("--dry-run", action="store_true")
-    train.add_argument("--smoke", action="store_true")
-    train.add_argument("--device")
+    train.add_argument("goal", help="Describe what to train or improve")
+    train.add_argument("--provider", choices=["local", "runpod", "vast"], default="local",
+                       help="Where to train (default: local)")
+    train.add_argument("--gpu", help="GPU type to request from a cloud provider")
+    train.add_argument("--budget-mins", type=float, default=5,
+                       help="Training minutes per attempt, excluding setup (default: 5)")
+    train.add_argument("--max-iters", type=int, default=5,
+                       help="Agent edits to try after the baseline (default: 5; 0 for baseline only)")
+    train.add_argument("--workdir", default="runs", help="Directory for training workspaces (default: runs)")
+    train.add_argument("--dry-run", action="store_true", help="Simulate training; no usable checkpoint is produced")
+    train.add_argument("--smoke", action="store_true", help="Train a tiny model to check the pipeline")
+    train.add_argument("--device", choices=["cpu", "cuda", "mps"], help="Override the training device")
     train.set_defaults(func=train_command)
     for name in ("run", "chat"):
-        chat = subs.add_parser(name)
-        chat.add_argument("path", nargs="?" if name == "chat" else None)
-        chat.add_argument("--prompt")
-        chat.add_argument("--max-tokens", type=int, default=128)
-        chat.add_argument("--device", choices=["cpu", "cuda", "mps"])
-        chat.add_argument("--temperature", type=float, default=0.8)
-        chat.add_argument("--top-k", type=int, default=50)
+        chat = subs.add_parser(name, help="Generate text from a trusted checkpoint")
+        checkpoint = chat.add_mutually_exclusive_group(required=name == "run")
+        checkpoint.add_argument("path", nargs="?", help="Trusted checkpoint directory or model.pt")
+        checkpoint.add_argument("--latest", action="store_true",
+                                help="Use the newest trained checkpoint under the local runs/ directory")
+        chat.add_argument("--prompt", help="Generate once; omit for an interactive prompt session")
+        chat.add_argument("--max-tokens", type=int, default=128, help="Maximum new tokens (default: 128)")
+        chat.add_argument("--device", choices=["cpu", "cuda", "mps"], help="Override the inference device")
+        chat.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature (default: 0.8)")
+        chat.add_argument("--top-k", type=int, default=50, help="Sample from the top K tokens (default: 50)")
         chat.set_defaults(func=chat_command)
     for name in ("status", "destroy"):
         command = subs.add_parser(name)
