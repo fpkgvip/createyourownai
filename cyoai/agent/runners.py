@@ -146,6 +146,11 @@ class RemoteRunner:
                 self.log(line.rstrip())
                 lines.append(line.rstrip() + "\n")
         except Exception as exc:
+            try:
+                for _ in self.provider.exec_stream(self.instance, "pkill -KILL -f '[t]rain.py' || true"):
+                    pass
+            except Exception:
+                self.log("Remote training cleanup failed")
             return 1, "".join(lines) + str(exc)
         return 0, "".join(lines)
 

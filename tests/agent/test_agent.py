@@ -222,6 +222,9 @@ def test_remote_hard_timeout(workspace, monkeypatch):
         def sync_up(self, *args): pass
         def exec_stream(self, instance, command):
             commands.append(command)
+            if "pkill" in command:
+                release.set()
+                return
             yield "started"
             release.wait(5)
     monkeypatch.setattr(runners, "hard_timeout_secs", lambda budget: .1)
@@ -231,6 +234,35 @@ def test_remote_hard_timeout(workspace, monkeypatch):
         assert code != 0 and "hard timeout" in output
         assert time.monotonic() - start < 2
         assert "timeout --signal=TERM --kill-after=5s 0.1s env" in commands[0]
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_remote_timeout_drains_cleanup_before_return(workspace, monkeypatch, cleanup_fails):
+    release = threading.Event()
+    events = []
+    class Provider:
+        def sync_up(self, *args): pass
+        def exec_stream(self, instance, command):
+            if "pkill" in command:
+                events.append("cleanup started")
+                assert "-KILL" in command and "'[t]rain.py'" in command
+                release.set()
+                yield "stopping training"
+                if cleanup_fails:
+                    events.append("cleanup failed")
+                    raise RuntimeError("cleanup transport failed")
+                events.append("cleanup finished")
+                return
+            yield "started"
+            release.wait(5)
+    monkeypatch.setattr(runners, "hard_timeout_secs", lambda budget: .05)
+    try:
+        code, output = RemoteRunner(Provider(), "id", "/work", workspace).run()
+        events.append("returned")
+        assert code != 0 and "hard timeout" in output
+        assert events == ["cleanup started", "cleanup failed" if cleanup_fails else "cleanup finished", "returned"]
     finally:
         release.set()
 
