@@ -1,0 +1,45 @@
+# Local credentials
+.env
+.env.*
+!/.env.example
+.envrc
+.envrc.*
+.netrc
+.git-credentials
+.ssh/
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.pem
+*.key
+*.p12
+*.pfx
+.cyoai/
+.config/cyoai/
+
+# Python environments, caches, and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Generated training workspaces and artifacts
+/runs/
+/artifacts/
+/checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+results.tsv
+run.log
