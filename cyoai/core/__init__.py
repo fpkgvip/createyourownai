@@ -1,0 +1,1 @@
+"""Portable autoresearch workspace template."""
