@@ -1,10 +1,54 @@
 import fnmatch
 import os
 from pathlib import Path
+import queue
 import shlex
 import shutil
 import signal
 import subprocess
+import threading
+import time
+
+
+def hard_timeout_secs(budget_secs):
+    return 2 * budget_secs + 120
+
+
+def stream_until(stream, deadline):
+    messages = queue.Queue()
+
+    def read():
+        try:
+            for line in stream:
+                messages.put(("line", line))
+        except BaseException as exc:
+            messages.put(("error", exc))
+        finally:
+            messages.put(("end", None))
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Training exceeded hard timeout")
+            try:
+                kind, value = messages.get(timeout=remaining)
+            except queue.Empty:
+                raise TimeoutError("Training exceeded hard timeout") from None
+            if kind == "end":
+                break
+            if kind == "error":
+                raise value
+            yield value
+    finally:
+        close = getattr(stream, "close", None)
+        if close is not None and not reader.is_alive():
+            try:
+                close()
+            except (ValueError, RuntimeError):
+                pass
 
 
 def scrub_env(env):
@@ -28,11 +72,19 @@ class LocalRunner:
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    start_new_session=True)
         output = []
+        deadline = time.monotonic() + hard_timeout_secs(self.budget_secs)
         try:
-            for line in process.stdout:
+            for line in stream_until(process.stdout, deadline):
                 self.log(line.rstrip())
                 output.append(line)
-            return process.wait(), "".join(output)
+            return process.wait(timeout=max(0, deadline - time.monotonic())), "".join(output)
+        except (TimeoutError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.log("Training exceeded hard timeout")
+            return 124, "".join(output) + "\nTraining exceeded hard timeout\n"
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -41,6 +93,7 @@ class LocalRunner:
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
+            process.stdout.close()
 
     def keep(self):
         best = self.workspace / "best"
@@ -65,9 +118,12 @@ class RemoteRunner:
         env["CYOAI_OUT_DIR"] = self.remote_dir + "/out"
         prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
         run = "uv run --extra cpu" if env.get("CYOAI_DEVICE") == "cpu" else "uv run"
-        command = f"cd {shlex.quote(self.remote_dir)} && {prefix} {run} train.py"
+        timeout = hard_timeout_secs(self.budget_secs)
+        command = (f"cd {shlex.quote(self.remote_dir)} && timeout --signal=TERM --kill-after=5s "
+                   f"{timeout}s env {prefix} {run} train.py")
         try:
-            for line in self.provider.exec_stream(self.instance, command):
+            stream = self.provider.exec_stream(self.instance, command)
+            for line in stream_until(stream, time.monotonic() + timeout):
                 self.log(line.rstrip())
                 lines.append(line.rstrip() + "\n")
         except Exception as exc:

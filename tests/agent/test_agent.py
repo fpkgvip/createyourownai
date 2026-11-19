@@ -1,5 +1,8 @@
 import json
+import os
 import sys
+import threading
+import time
 
 import httpx
 import pytest
@@ -7,6 +10,7 @@ import pytest
 from cyoai.agent.llm import AnthropicClient, FakeLLM, OpenAIClient, make_llm
 from cyoai.agent.loop import ResearchLoop, parse_metrics, parse_proposal
 from cyoai.agent.runners import LocalRunner, RemoteRunner
+from cyoai.agent import runners
 from cyoai.agent.workspace import create_workspace, git
 from cyoai.config import Config
 
@@ -194,3 +198,37 @@ def test_remote_runner(workspace, monkeypatch):
     assert "CYOAI_OUT_DIR=/workspace/test/out" in calls[1][1]
     assert "uv run --extra cpu train.py" in calls[1][1]
     assert {call[1][1].split("/")[-1] for call in calls if call[0] == "down"} == {"model.pt", "tokenizer.pkl", "train.py", "metrics.json"}
+
+
+@pytest.mark.parametrize("body", ["time.sleep(30)", "\nwhile True:\n print('working', flush=True)\n time.sleep(.01)",
+                                  "os.close(1); os.close(2); time.sleep(30)"])
+def test_local_hard_timeout(workspace, monkeypatch, body):
+    monkeypatch.setattr(runners, "hard_timeout_secs", lambda budget: .2)
+    (workspace / "hang.py").write_text(
+        "import os, time\nfrom pathlib import Path\nPath('pid').write_text(str(os.getpid()))\n" + body + "\n")
+    start = time.monotonic()
+    code, output = LocalRunner(workspace, cmd=f"{sys.executable} hang.py", log=lambda _: None).run()
+    assert code != 0 and "hard timeout" in output
+    assert time.monotonic() - start < 3
+    with pytest.raises(ProcessLookupError):
+        os.kill(int((workspace / "pid").read_text()), 0)
+
+
+def test_remote_hard_timeout(workspace, monkeypatch):
+    release = threading.Event()
+    commands = []
+    class Provider:
+        def sync_up(self, *args): pass
+        def exec_stream(self, instance, command):
+            commands.append(command)
+            yield "started"
+            release.wait(5)
+    monkeypatch.setattr(runners, "hard_timeout_secs", lambda budget: .1)
+    start = time.monotonic()
+    try:
+        code, output = RemoteRunner(Provider(), "id", "/work", workspace).run()
+        assert code != 0 and "hard timeout" in output
+        assert time.monotonic() - start < 2
+        assert "timeout --signal=TERM --kill-after=5s 0.1s env" in commands[0]
+    finally:
+        release.set()
