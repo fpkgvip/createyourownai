@@ -98,7 +98,7 @@ def test_ast_helpers_and_repl_exit(tmp_path, monkeypatch):
     snapshot.write_text('import math\nOFFSET = 3\ndef helper(x):\n    return math.sqrt(x) + OFFSET\nraise RuntimeError("no")\n')
     module = _snapshot_module(snapshot, torch.device("cpu"))
     assert module.helper(4) == 5
-    for value in ("", "exit"):
+    for value in ("", "exit", "quit", "/exit", " EXIT "):
         monkeypatch.setattr("builtins.input", lambda _: value)
         repl(None, None)
     def eof(_):
@@ -125,3 +125,77 @@ raise RuntimeError("training must not execute")
     torch.testing.assert_close(module.GPT()(torch.ones(1)), torch.tensor([3 / 2**0.5]))
     assert not hasattr(module, "model")
     assert not hasattr(module, "loss")
+
+
+def test_run_directory_uses_checkpoint_snapshot(smoke_checkpoint, tmp_path):
+    run = tmp_path / "run"
+    shutil.copytree(smoke_checkpoint, run / "best")
+    (run / "train.py").write_text('raise RuntimeError("workspace changed")\n')
+    _, _, info = load_model(run, "cpu")
+    assert info["source"] == str(run / "best/train.py")
+    assert info["snapshot_error"] is None
+
+
+@pytest.mark.parametrize("change", ["class", "shape"])
+def test_changed_snapshot_falls_back(smoke_checkpoint, tmp_path, change):
+    out = tmp_path / "checkpoint"
+    shutil.copytree(smoke_checkpoint, out)
+    snapshot = out / "train.py"
+    source = snapshot.read_text()
+    if change == "class":
+        source = source.replace("class GPT(", "class RenamedGPT(")
+    else:
+        source = source.replace("self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)",
+                                "self.lm_head = nn.Linear(config.n_embd, config.vocab_size + 1, bias=False)")
+    snapshot.write_text(source)
+    with pytest.warns(RuntimeWarning, match="Snapshot failed.*trying bundled"):
+        model, tokenizer, info = load_model(out, "cpu")
+    assert info["snapshot_error"]
+    assert info["source"] == str(CORE / "train.py")
+    assert generate(model, tokenizer, "Once", max_new_tokens=1, temperature=0)
+
+
+@pytest.mark.parametrize("problem,expected", [
+    ("missing-model", "Checkpoint not found"),
+    ("missing-tokenizer", "Restore tokenizer.pkl"),
+    ("corrupt-tokenizer", "Could not load tokenizer"),
+    ("corrupt-model", "Could not read checkpoint"),
+])
+def test_artifact_errors_are_actionable(smoke_checkpoint, tmp_path, problem, expected):
+    out = tmp_path / "checkpoint"
+    shutil.copytree(smoke_checkpoint, out)
+    if problem == "missing-model":
+        (out / "model.pt").unlink()
+    elif problem == "missing-tokenizer":
+        (out / "tokenizer.pkl").unlink()
+    elif problem == "corrupt-tokenizer":
+        (out / "tokenizer.pkl").write_text("Synthetic dry-run artifact")
+    else:
+        (out / "model.pt").write_text("Synthetic dry-run artifact")
+    with pytest.raises((ValueError, FileNotFoundError), match=expected):
+        load_model(out, "cpu")
+    result = subprocess.run([sys.executable, str(CORE / "infer.py"), str(out),
+                             "--prompt", "Once", "--device", "cpu"],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 1
+    assert expected in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("command", ["run", "chat"])
+@pytest.mark.parametrize("path_kind", ["run", "best", "model", "latest"])
+def test_console_paths_and_interaction(smoke_checkpoint, tmp_path, command, path_kind):
+    best = tmp_path / "runs/20260101/best"
+    shutil.copytree(smoke_checkpoint, best)
+    paths = {"run": best.parent, "best": best, "model": best / "model.pt"}
+    args = [sys.executable, "-m", "cyoai.cli", command]
+    if path_kind != "latest":
+        args.append(str(paths[path_kind]))
+    args += ["--device", "cpu", "--max-tokens", "2", "--temperature", "0"]
+    env = dict(os.environ, PYTHONPATH=str(ROOT), OMP_NUM_THREADS="2")
+    for suffix, stdin in [(["--prompt", "Once"], ""), ([], "Once\nexit\n"), ([], "Once\n"), ([], "")]:
+        result = subprocess.run(args + suffix, cwd=tmp_path, env=env, input=stdin,
+                                capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip()
+        assert "Traceback" not in result.stderr

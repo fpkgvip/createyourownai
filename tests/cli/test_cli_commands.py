@@ -178,6 +178,48 @@ def test_inference_uv_fallback(tmp_path, monkeypatch):
     assert "--max-new-tokens" in command
 
 
+@pytest.mark.parametrize("command", ["run", "chat"])
+def test_default_checkpoint_and_empty_runs(command, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "runs").mkdir()
+    assert cli.main([command, "--prompt", "hi"]) == 1
+    assert "No trained checkpoint found" in capsys.readouterr().err
+    for run in ("20260101", "20260102"):
+        best = tmp_path / "runs" / run / "best"
+        best.mkdir(parents=True)
+        (best / "model.pt").touch()
+        (best / "tokenizer.pkl").touch()
+    paths = []
+    fake = types.SimpleNamespace(
+        load_model=lambda path, device: paths.append(path) or (None, None, {}),
+        generate=lambda *args, **kwargs: "completion",
+    )
+    monkeypatch.setattr(cli.importlib, "import_module", lambda name: fake)
+    assert cli.main([command, "--prompt", "hi"]) == 0
+    assert paths == [Path("runs/20260102/best")]
+    assert "completion" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("value", ["exit", "quit", "/exit", " EXIT ", ""])
+def test_chat_exit_commands(tmp_path, monkeypatch, value):
+    (tmp_path / "model.pt").write_text("model")
+    def unexpected(*args, **kwargs):
+        pytest.fail("Exit commands must not generate text")
+    fake = types.SimpleNamespace(load_model=lambda path, device: (None, None, {}), generate=unexpected)
+    monkeypatch.setattr("builtins.input", lambda _: value)
+    monkeypatch.setattr(cli.importlib, "import_module", lambda name: fake)
+    assert cli.main(["chat", str(tmp_path)]) == 0
+
+
+@pytest.mark.parametrize("option", ["--max-tokens", "--temperature", "--top-k"])
+def test_generation_options_rejected_before_loading(option, tmp_path, monkeypatch, capsys):
+    def unexpected(name):
+        pytest.fail("Invalid options must not load inference dependencies")
+    monkeypatch.setattr(cli.importlib, "import_module", unexpected)
+    assert cli.main(["run", str(tmp_path), option, "-1"]) == 1
+    assert "must be non-negative" in capsys.readouterr().err
+
+
 def test_status_does_not_print_raw(monkeypatch, capsys):
     instance = types.SimpleNamespace(id="safe-id", status="running", gpu="safe-gpu",
                                      raw={"env": {"API_KEY": "must-not-print"}})
