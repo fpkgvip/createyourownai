@@ -23,11 +23,29 @@ else:
     from device import get_device
 
 
+def _constant_expression(node, names):
+    if isinstance(node, ast.Name):
+        return node.id in names
+    if isinstance(node, ast.Attribute):
+        return isinstance(node.value, ast.Name) and node.value.id == "math" and not node.attr.startswith("_")
+    if isinstance(node, ast.Call):
+        return (isinstance(node.func, ast.Attribute) and _constant_expression(node.func, names)
+                and all(_constant_expression(arg, names) for arg in node.args)
+                and all(_constant_expression(kw.value, names) for kw in node.keywords))
+    if isinstance(node, (ast.Constant, ast.operator, ast.unaryop, ast.boolop, ast.cmpop, ast.Load)):
+        return True
+    if isinstance(node, (ast.BinOp, ast.UnaryOp, ast.BoolOp, ast.Compare, ast.IfExp,
+                         ast.Tuple, ast.List, ast.Set, ast.Dict)):
+        return all(_constant_expression(child, names) for child in ast.iter_child_nodes(node))
+    return False
+
+
 def _snapshot_module(path, device):
     tree = ast.parse(path.read_text(), filename=str(path))
     excluded = {"kernels", "prepare", "device", "checkpoint"}
     injected = {"fa3", "USE_CUDA", "SMOKE", "device", "compile_cuda"}
     body = []
+    constants = {"USE_CUDA", "SMOKE"}
     for node in tree.body:
         if isinstance(node, ast.Import):
             names = [alias for alias in node.names if alias.name.split(".")[0] not in excluded]
@@ -46,8 +64,10 @@ def _snapshot_module(path, device):
             try:
                 ast.literal_eval(node.value)
             except (ValueError, TypeError):
-                continue
+                if not _constant_expression(node.value, constants):
+                    continue
             body.append(node)
+            constants.update(t.id for t in targets)
     module = types.ModuleType(f"_cyoai_snapshot_{uuid.uuid4().hex}")
     module.__dict__.update(
         __file__=str(path), fa3=attention, USE_CUDA=False, SMOKE=False,

@@ -105,3 +105,23 @@ def test_ast_helpers_and_repl_exit(tmp_path, monkeypatch):
         raise EOFError
     monkeypatch.setattr("builtins.input", eof)
     repl(None, None)
+
+
+def test_snapshot_computed_constant_in_forward(tmp_path):
+    snapshot = tmp_path / "train.py"
+    snapshot.write_text('''import math
+import torch
+BASE = 2
+SCALE = 1 / math.sqrt(BASE)
+SHIFT: float = SCALE * 2
+class GPT(torch.nn.Module):
+    def forward(self, x):
+        return x * SCALE + SHIFT
+model = GPT()
+loss = model(torch.ones(1))
+raise RuntimeError("training must not execute")
+''')
+    module = _snapshot_module(snapshot, torch.device("cpu"))
+    torch.testing.assert_close(module.GPT()(torch.ones(1)), torch.tensor([3 / 2**0.5]))
+    assert not hasattr(module, "model")
+    assert not hasattr(module, "loss")
