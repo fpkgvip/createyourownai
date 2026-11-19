@@ -1,0 +1,109 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  OMP_NUM_THREADS: '2'
+  MKL_NUM_THREADS: '2'
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Install dependencies
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          uv sync --extra dev 2>&1 | tee artifacts/sync.log
+      - name: Full test suite (including CPU core dependencies)
+        run: |
+          set -o pipefail
+          uv run --project cyoai/core --extra cpu --with . --with pytest --with responses python -m pytest tests 2>&1 | tee artifacts/tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tests
+          path: artifacts/*.log
+
+  train-and-generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/autoresearch-smoke
+          key: cpu-smoke-${{ runner.os }}-${{ hashFiles('cyoai/core/prepare.py') }}
+      - name: Install dependencies
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          uv sync 2>&1 | tee artifacts/sync.log
+      - name: Train real CPU baseline
+        run: |
+          set -o pipefail
+          CYOAI_LLM_PROVIDER=fake uv run cyoai train "Train a tiny baseline" --provider local --smoke --device cpu --budget-mins 0.05 --max-iters 0 2>&1 | tee artifacts/train.log
+      - name: Assert checkpoint and validation metric
+        run: |
+          python - <<'PY'
+          import csv
+          import math
+          from pathlib import Path
+
+          runs = sorted(Path('runs').glob('*/results.tsv'))
+          assert len(runs) == 1, f'Expected one real training run, got {runs}'
+          results = runs[0]
+          for name in ('model.pt', 'tokenizer.pkl', 'train.py', 'metrics.json'):
+              checkpoint = results.parent / 'best' / name
+              assert checkpoint.is_file() and checkpoint.stat().st_size > 0, checkpoint
+          rows = list(csv.DictReader(results.open(), delimiter='\t'))
+          assert rows, 'results.tsv has no measurements'
+          assert all(math.isfinite(float(row['val_bpb'])) for row in rows), rows
+          Path('artifacts/results.tsv').write_text(results.read_text())
+          PY
+      - name: Generate text from trained checkpoint
+        run: |
+          set -o pipefail
+          uv run cyoai run --latest --prompt "Once upon a time" --max-tokens 32 2> >(tee artifacts/generate.stderr.log >&2) | tee artifacts/generate.log artifacts/generated.txt
+      - name: Assert generated continuation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          text = Path('artifacts/generated.txt').read_text().strip()
+          assert text, 'Generated text is empty'
+          assert text != 'Once upon a time', 'Only the prompt was generated'
+          PY
+      - name: Publish results and generated text
+        if: always()
+        run: |
+          for file in artifacts/results.tsv artifacts/generated.txt; do
+            if [[ -f "$file" ]]; then
+              { printf '\n### %s\n```text\n' "$file"; cat "$file"; printf '\n```\n'; } | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: train-and-generate
+          path: |
+            artifacts/
+            runs/**/results.tsv
+            runs/**/run.log
