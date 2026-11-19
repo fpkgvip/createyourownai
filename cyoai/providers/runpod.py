@@ -1,3 +1,5 @@
+import re
+
 from .base import Instance, ProviderError
 from .http import HTTPProvider
 from .ssh import public_key
@@ -16,8 +18,11 @@ class RunPodProvider(HTTPProvider):
             return ""
         if not isinstance(problem, dict):
             return ""
-        return ": ".join(problem[key] for key in ("title", "detail")
-                         if isinstance(problem.get(key), str)).replace(self.api_key, "[REDACTED]")
+        detail = ": ".join(problem[key] for key in ("title", "detail")
+                           if isinstance(problem.get(key), str))
+        if re.search(r"authorization|bearer\s|x-api-key|-----BEGIN .*PRIVATE KEY-----", detail, re.I):
+            return ""
+        return detail.replace(self.api_key, "[REDACTED]")
 
     def _instance(self, data):
         endpoint = (data.get("ssh") or {}).get("direct") or {}
@@ -40,7 +45,18 @@ class RunPodProvider(HTTPProvider):
         })
         if not isinstance(data, dict) or not data.get("id"):
             raise ProviderError("runpod provision response has no instance id")
-        return self._instance(data)
+        try:
+            return self._instance(data)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            instance_id = str(data["id"])
+            try:
+                self.destroy(instance_id)
+            except Exception as exc:
+                raise ProviderError(
+                    f"{exc}. Instance {instance_id} may still be running; "
+                    f"clean up with: cyoai destroy {instance_id} --provider runpod"
+                ) from None
+            raise ProviderError("runpod returned invalid instance details; instance was deleted") from None
 
     def get(self, instance_id):
         return self._instance(self._request("GET", f"/pods/{instance_id}"))
