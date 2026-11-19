@@ -13,9 +13,9 @@ def git(workspace: Path, *args: str) -> str:
 def initialize_git(workspace: Path) -> None:
     if not (workspace / ".git").exists():
         git(workspace, "init")
-    git(workspace, "add", "train.py", "program.md")
-    if (workspace / "prepare.py").exists():
-        git(workspace, "add", "prepare.py")
+    sources = [path.name for path in workspace.iterdir() if path.is_file() and
+               (path.suffix in {".py", ".md", ".toml"} or path.name == ".gitignore")]
+    git(workspace, "add", *sources)
     git(workspace, "commit", "--allow-empty", "-m", "Research baseline")
 
 
@@ -35,5 +35,6 @@ def create_workspace(goal: str, dest: Path, source_dir: Path | None = None) -> P
             shutil.copy2(source, workspace / source.name)
     program = workspace / "program.md"
     program.write_text((program.read_text() if program.exists() else "") + "\n## User goal\n\n" + goal + "\n")
+    (workspace / ".gitignore").write_text("out/\nbest/\n.venv/\n__pycache__/\nresults.tsv\n")
     initialize_git(workspace)
     return workspace

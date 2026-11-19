@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import stat
 import types
+from contextlib import contextmanager
 
 import pytest
 
@@ -15,6 +16,14 @@ def isolated_config(tmp_path, monkeypatch):
     for key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "RUNPOD_API_KEY", "VAST_API_KEY",
                 "CYOAI_LLM_PROVIDER", "CYOAI_LLM_MODEL", "CYOAI_LLM_BASE_URL", "CYOAI_FAKE_LLM_RESPONSES"):
         monkeypatch.delenv(key, raising=False)
+    @contextmanager
+    def manage(provider, **kwargs):
+        instance = provider.provision(**kwargs)
+        try:
+            yield provider.wait_ready(instance)
+        finally:
+            provider.destroy(instance.id)
+    monkeypatch.setattr(cli, "managed_instance", manage)
 
 
 def test_config_permissions_override(tmp_path, monkeypatch):
@@ -97,15 +106,15 @@ def test_remote_smoke_and_destroy_success(tmp_path, monkeypatch):
     save_config(Config(llm_provider="fake", runpod_api_key="test-key"))
     assert cli.main(["train", "goal", "--provider", "runpod", "--smoke", "--device", "cpu",
                      "--workdir", str(tmp_path / "runs"), "--max-iters", "0"]) == 0
-    assert "uv run prepare.py --num-shards 1" in commands[1]
+    assert "uv run --extra cpu prepare.py --num-shards 1" in commands[1]
     assert "CYOAI_SMOKE=1" in commands[2] and "CYOAI_DEVICE=cpu" in commands[2]
     assert destroyed == ["id"]
 
 
 def test_chat_one_shot(tmp_path, monkeypatch, capsys):
     (tmp_path / "model.pt").write_text("model")
-    fake = types.SimpleNamespace(load_model=lambda path: path,
-                                 generate=lambda model, prompt, max_tokens: "generated:" + prompt)
+    fake = types.SimpleNamespace(load_model=lambda path, device: (path, "tokenizer", {}),
+                                 generate=lambda model, tokenizer, prompt, **kwargs: "generated:" + prompt)
     monkeypatch.setattr(cli.importlib, "import_module", lambda name: fake)
     assert cli.main(["run", str(tmp_path), "--prompt", "hello"]) == 0
     assert "generated:hello" in capsys.readouterr().out
@@ -115,3 +124,25 @@ def test_cli_errors(tmp_path):
     assert cli.main(["train", "goal", "--max-iters", "-1"]) == 1
     assert cli.main(["run", str(tmp_path / "absent")]) == 1
     assert cli.main(["destroy"]) == 1
+
+
+@pytest.mark.parametrize("arguments", [["status"], ["destroy", "--all"]])
+def test_all_providers_skips_missing_credentials(arguments, capsys):
+    assert cli.main(arguments) == 0
+    assert "Skipping runpod" in capsys.readouterr().err
+    assert cli.main(arguments + ["--provider", "runpod"]) == 1
+
+
+def test_inference_uv_fallback(tmp_path, monkeypatch):
+    (tmp_path / "model.pt").write_text("model")
+    calls = []
+    def missing(name):
+        raise ModuleNotFoundError("No module named torch", name="torch")
+    monkeypatch.setattr(cli.importlib, "import_module", missing)
+    monkeypatch.setattr(cli.subprocess, "run", lambda command, **kwargs:
+                        calls.append((command, kwargs)) or types.SimpleNamespace(returncode=0))
+    assert cli.main(["run", str(tmp_path), "--prompt", "hi"]) == 0
+    command = calls[0][0]
+    assert command[:5] == ["uv", "run", "--extra", "cpu", "python"]
+    assert "--prompt" in command
+    assert "--max-new-tokens" in command

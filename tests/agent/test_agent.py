@@ -18,6 +18,8 @@ def workspace(tmp_path):
     (source / "train.py").write_text("x = 0\n")
     (source / "prepare.py").write_text("# immutable\n")
     (source / "program.md").write_text("Minimize val_bpb\n")
+    for name in ("attention.py", "checkpoint.py", "device.py"):
+        (source / name).write_text("# helper\n")
     return create_workspace("test goal", tmp_path / "runs", source)
 
 
@@ -48,6 +50,9 @@ def test_loop_keep_discard_crash(workspace):
     assert git(workspace, "rev-parse", "HEAD") == best.commit
     assert (workspace / "prepare.py").read_text() == "# immutable\n"
     assert "## User goal\n\ntest goal" in (workspace / "program.md").read_text()
+    for name in ("attention.py", "checkpoint.py", "device.py"):
+        assert (workspace / name).read_text() == "# helper\n"
+        assert name in git(workspace, "ls-files").splitlines()
 
 
 def test_loop_interrupt_restores(workspace):
@@ -157,14 +162,19 @@ def test_local_runner_scrubs_secrets_and_keeps_flags(workspace, monkeypatch):
     assert env["CYOAI_TIME_BUDGET"] == "17"
     assert env["CYOAI_SMOKE"] == "1"
     assert env["CYOAI_DEVICE"] == "cpu"
+    assert env["CYOAI_OUT_DIR"] == str(workspace / "out")
 
 
 def test_best_artifacts(workspace):
-    for name in ("model.pt", "tokenizer.pkl"):
-        (workspace / name).write_text("best")
+    (workspace / "out").mkdir()
+    for name in ("model.pt", "tokenizer.pkl", "train.py", "metrics.json"):
+        (workspace / "out" / name).write_text("best")
     LocalRunner(workspace).keep()
-    for name in ("model.pt", "tokenizer.pkl"):
+    for name in ("model.pt", "tokenizer.pkl", "train.py", "metrics.json"):
         assert (workspace / "best" / name).read_text() == "best"
+    git(workspace, "reset", "--hard", "HEAD")
+    assert (workspace / "out/model.pt").exists()
+    assert (workspace / "best/model.pt").exists()
 
 
 def test_remote_runner(workspace, monkeypatch):
@@ -181,4 +191,6 @@ def test_remote_runner(workspace, monkeypatch):
     runner.keep()
     assert "CYOAI_SMOKE=1" in calls[1][1]
     assert "CYOAI_DEVICE=cpu" in calls[1][1]
-    assert {call[1][1].split("/")[-1] for call in calls if call[0] == "down"} == {"model.pt", "tokenizer.pkl"}
+    assert "CYOAI_OUT_DIR=/workspace/test/out" in calls[1][1]
+    assert "uv run --extra cpu train.py" in calls[1][1]
+    assert {call[1][1].split("/")[-1] for call in calls if call[0] == "down"} == {"model.pt", "tokenizer.pkl", "train.py", "metrics.json"}

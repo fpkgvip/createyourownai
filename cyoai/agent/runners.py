@@ -14,13 +14,16 @@ def scrub_env(env):
 
 
 class LocalRunner:
-    def __init__(self, workspace, budget_secs=300, cmd="uv run train.py", extra_env=None, log=print):
+    def __init__(self, workspace, budget_secs=300, cmd=None, extra_env=None, log=print):
         self.workspace, self.budget_secs = Path(workspace), budget_secs
-        self.cmd, self.extra_env, self.log = cmd, extra_env or {}, log
+        self.extra_env, self.log = extra_env or {}, log
+        cpu = self.extra_env.get("CYOAI_DEVICE", os.environ.get("CYOAI_DEVICE")) == "cpu"
+        self.cmd = cmd or ("uv run --extra cpu train.py" if cpu else "uv run train.py")
 
     def run(self):
         env = scrub_env({**os.environ, **self.extra_env})
         env["CYOAI_TIME_BUDGET"] = str(int(self.budget_secs))
+        env["CYOAI_OUT_DIR"] = str((self.workspace / "out").resolve())
         process = subprocess.Popen(shlex.split(self.cmd), cwd=self.workspace, env=env,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    start_new_session=True)
@@ -41,11 +44,9 @@ class LocalRunner:
 
     def keep(self):
         best = self.workspace / "best"
-        for name in ("model.pt", "tokenizer.pkl"):
-            source = self.workspace / name
-            if source.exists():
-                best.mkdir(exist_ok=True)
-                shutil.copy2(source, best / name)
+        best.mkdir(exist_ok=True)
+        for name in ("model.pt", "tokenizer.pkl", "train.py", "metrics.json"):
+            shutil.copy2(self.workspace / "out" / name, best / name)
 
 
 class RemoteRunner:
@@ -61,8 +62,10 @@ class RemoteRunner:
         env = {key: value for key, value in {**os.environ, **self.extra_env}.items()
                if key in {"CYOAI_SMOKE", "CYOAI_DEVICE"}}
         env["CYOAI_TIME_BUDGET"] = str(int(self.budget_secs))
+        env["CYOAI_OUT_DIR"] = self.remote_dir + "/out"
         prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
-        command = f"cd {shlex.quote(self.remote_dir)} && {prefix} uv run train.py"
+        run = "uv run --extra cpu" if env.get("CYOAI_DEVICE") == "cpu" else "uv run"
+        command = f"cd {shlex.quote(self.remote_dir)} && {prefix} {run} train.py"
         try:
             for line in self.provider.exec_stream(self.instance, command):
                 self.log(line.rstrip())
@@ -74,8 +77,8 @@ class RemoteRunner:
     def keep(self):
         best = self.workspace / "best"
         best.mkdir(exist_ok=True)
-        for name in ("model.pt", "tokenizer.pkl"):
-            self.provider.sync_down(self.instance, self.remote_dir + "/" + name, best / name)
+        for name in ("model.pt", "tokenizer.pkl", "train.py", "metrics.json"):
+            self.provider.sync_down(self.instance, self.remote_dir + "/out/" + name, best / name)
 
 
 class FakeRunner:

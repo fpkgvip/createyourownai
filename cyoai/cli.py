@@ -8,12 +8,13 @@ import os
 from pathlib import Path
 import shlex
 import sys
+import subprocess
 import tempfile
 
 from cyoai.config import Config, load_config, masked_config, save_config
 from cyoai.agent.llm import FakeLLM, make_llm
 from cyoai.agent.loop import ResearchLoop
-from cyoai.agent.runners import FakeRunner, LocalRunner, RemoteRunner
+from cyoai.agent.runners import FakeRunner, LocalRunner, RemoteRunner, scrub_env
 from cyoai.agent.workspace import create_workspace
 
 
@@ -30,6 +31,11 @@ def provider_for(name, config):
     if not key:
         raise ValueError(f"No {name} API key configured")
     return get_provider(name, key)
+
+
+def managed_instance(provider, **kwargs):
+    from cyoai.providers import managed_instance as manage
+    return manage(provider, **kwargs)
 
 
 def init_command(args):
@@ -84,16 +90,16 @@ def train_command(args):
     elif args.provider == "local":
         runner = LocalRunner(workspace, args.budget_mins * 60, extra_env=extra_env)
         smoke = extra_env.get("CYOAI_SMOKE", os.environ.get("CYOAI_SMOKE")) == "1"
-        bootstrap = LocalRunner(workspace, cmd="uv run prepare.py" + (" --num-shards 1" if smoke else ""), extra_env=extra_env)
+        cpu = extra_env.get("CYOAI_DEVICE", os.environ.get("CYOAI_DEVICE")) == "cpu"
+        run = "uv run --extra cpu" if cpu else "uv run"
+        bootstrap = LocalRunner(workspace, cmd=run + " prepare.py" + (" --num-shards 1" if smoke else ""), extra_env=extra_env)
         code, _ = bootstrap.run()
         if code:
             raise RuntimeError("Dataset preparation failed")
         best = ResearchLoop(workspace, llm, runner, args.max_iters).run()
     else:
         provider = provider_for(args.provider, config)
-        instance = provider.provision(gpu=args.gpu)
-        try:
-            instance = provider.wait_ready(instance)
+        with managed_instance(provider, gpu=args.gpu) as instance:
             remote_dir = "/workspace/cyoai"
             for line in provider.exec_stream(instance, f"mkdir -p {shlex.quote(remote_dir)}"):
                 print(line.rstrip())
@@ -101,9 +107,12 @@ def train_command(args):
                 if source.is_file() and source.suffix in {".py", ".md", ".toml"}:
                     provider.sync_up(instance, source, remote_dir + "/" + source.name)
             smoke = extra_env.get("CYOAI_SMOKE", os.environ.get("CYOAI_SMOKE")) == "1"
+            cpu = extra_env.get("CYOAI_DEVICE", os.environ.get("CYOAI_DEVICE")) == "cpu"
+            run = "uv run --extra cpu" if cpu else "uv run"
+            sync = "uv sync --extra cpu" if cpu else "uv sync"
             command = (f"cd {shlex.quote(remote_dir)} && "
                        "(command -v uv >/dev/null 2>&1 || python -m pip install uv) && "
-                       "uv sync && uv run prepare.py")
+                       f"{sync} && CYOAI_SMOKE={'1' if smoke else '0'} {run} prepare.py")
             if smoke:
                 command += " --num-shards 1"
             for line in provider.exec_stream(instance, command):
@@ -111,8 +120,6 @@ def train_command(args):
             runner = RemoteRunner(provider, instance, remote_dir, workspace,
                                   args.budget_mins * 60, extra_env=extra_env)
             best = ResearchLoop(workspace, llm, runner, args.max_iters).run()
-        finally:
-            provider.destroy(instance.id)
     if best is None:
         print("No successful training run", file=sys.stderr)
         return 1
@@ -131,13 +138,29 @@ def chat_command(args):
         raise FileNotFoundError(f"Checkpoint not found: {path}")
     try:
         infer = importlib.import_module("cyoai.core.infer")
+    except ModuleNotFoundError as exc:
+        if exc.name != "torch":
+            raise RuntimeError("Local inference is unavailable; install the complete core package") from exc
+        import cyoai
+        core_dir = Path(cyoai.__file__).parent / "core"
+        if not (core_dir / "infer.py").exists():
+            core_dir = core_dir / "autoresearch"
+        device = args.device or os.environ.get("CYOAI_DEVICE", "cpu")
+        command = ["uv", "run"] + (["--extra", "cpu"] if device == "cpu" else [])
+        command += ["python", "infer.py", str(path.resolve()), "--device", device,
+                    "--max-new-tokens", str(args.max_tokens), "--temperature", str(args.temperature),
+                    "--top-k", str(args.top_k)]
+        if args.prompt is not None:
+            command += ["--prompt", args.prompt]
+        return subprocess.run(command, cwd=core_dir, env=scrub_env(os.environ)).returncode
     except ImportError as exc:
         raise RuntimeError("Local inference is unavailable; install cyoai[train] with core inference support") from exc
     if not hasattr(infer, "load_model") or not hasattr(infer, "generate"):
-        raise RuntimeError("Core inference must expose load_model(path) and generate(model, prompt, max_tokens)")
-    model = infer.load_model(path)
+        raise RuntimeError("Core inference must expose load_model and generate")
+    model, tokenizer, _ = infer.load_model(path, device=args.device)
     def generate(prompt):
-        print(infer.generate(model, prompt, max_tokens=args.max_tokens))
+        print(infer.generate(model, tokenizer, prompt, max_new_tokens=args.max_tokens,
+                             temperature=args.temperature, top_k=args.top_k))
     if args.prompt is not None:
         generate(args.prompt)
     else:
@@ -158,6 +181,10 @@ def instances_command(args):
     if args.command == "destroy" and not args.all and not args.id:
         raise ValueError("Specify an instance ID or --all")
     for name in names:
+        key = config.runpod_api_key if name == "runpod" else config.vast_api_key
+        if args.provider == "all" and not key:
+            print(f"Skipping {name}: no API key configured", file=sys.stderr)
+            continue
         provider = provider_for(name, config)
         if args.command == "destroy" and not args.all:
             provider.destroy(args.id)
@@ -181,7 +208,7 @@ def parser():
     train = subs.add_parser("train", help="Research a model for a goal")
     train.add_argument("goal")
     train.add_argument("--provider", choices=["local", "runpod", "vast"], default="local")
-    train.add_argument("--gpu", default="NVIDIA GeForce RTX 4090")
+    train.add_argument("--gpu")
     train.add_argument("--budget-mins", type=float, default=5)
     train.add_argument("--max-iters", type=int, default=5)
     train.add_argument("--workdir", default="runs")
@@ -194,6 +221,9 @@ def parser():
         chat.add_argument("path", nargs="?" if name == "chat" else None)
         chat.add_argument("--prompt")
         chat.add_argument("--max-tokens", type=int, default=128)
+        chat.add_argument("--device", choices=["cpu", "cuda", "mps"])
+        chat.add_argument("--temperature", type=float, default=0.8)
+        chat.add_argument("--top-k", type=int, default=50)
         chat.set_defaults(func=chat_command)
     for name in ("status", "destroy"):
         command = subs.add_parser(name)
