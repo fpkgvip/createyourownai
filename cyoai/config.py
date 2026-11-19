@@ -24,6 +24,10 @@ def load_config() -> Config:
     path = config_dir() / "config.json"
     data = json.loads(path.read_text()) if path.exists() else {}
     data = {f.name: data[f.name] for f in fields(Config) if f.name in data}
+    provider_override = os.environ.get("CYOAI_LLM_PROVIDER")
+    if provider_override is not None and provider_override != data.get("llm_provider", "anthropic"):
+        for field in ("llm_model", "llm_api_key", "llm_base_url"):
+            data.pop(field, None)
     for field, env in {
         "llm_provider": "CYOAI_LLM_PROVIDER", "llm_model": "CYOAI_LLM_MODEL",
         "llm_base_url": "CYOAI_LLM_BASE_URL", "runpod_api_key": "RUNPOD_API_KEY",
@@ -32,11 +36,12 @@ def load_config() -> Config:
         if env in os.environ:
             data[field] = os.environ[env]
     provider = data.get("llm_provider", "anthropic")
-    key_env = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
-    if key_env in os.environ:
+    key_env = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider)
+    if key_env is not None and key_env in os.environ:
         data["llm_api_key"] = os.environ[key_env]
-    if "llm_model" not in data and provider == "openai":
-        data["llm_model"] = "gpt-4o"
+    if "llm_model" not in data:
+        data["llm_model"] = {"openai": "gpt-4o", "anthropic": "claude-sonnet-4-5",
+                             "fake": "fake"}.get(provider, "claude-sonnet-4-5")
     return Config(**data)
 
 

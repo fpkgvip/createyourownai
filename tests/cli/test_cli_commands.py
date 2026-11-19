@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import stat
 import types
@@ -158,3 +159,36 @@ def test_status_does_not_print_raw(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert output == "runpod\tsafe-id\trunning\tsafe-gpu\n"
     assert "must-not-print" not in output and "API_KEY" not in output
+
+
+@pytest.mark.parametrize("saved,selected,model,key_env", [
+    ("anthropic", "openai", "gpt-4o", "OPENAI_API_KEY"),
+    ("openai", "anthropic", "claude-sonnet-4-5", "ANTHROPIC_API_KEY"),
+    ("openai", "fake", "fake", None),
+])
+@pytest.mark.parametrize("have_key", [False, True])
+def test_provider_env_switch_clears_saved_llm_settings(monkeypatch, saved, selected, model, key_env, have_key):
+    save_config(Config(llm_provider=saved, llm_model="saved-custom-model", llm_api_key="saved-key",
+                       llm_base_url="https://old-provider.test", runpod_api_key="compute-key"))
+    monkeypatch.setenv("CYOAI_LLM_PROVIDER", selected)
+    if have_key:
+        monkeypatch.setenv("OPENAI_API_KEY", "new-openai-key")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "new-anthropic-key")
+    config = load_config()
+    assert config.llm_provider == selected
+    assert config.llm_model == model
+    assert config.llm_api_key == (os.environ[key_env] if have_key and key_env else "")
+    assert config.llm_base_url is None
+    assert config.runpod_api_key == "compute-key"
+    monkeypatch.setenv("CYOAI_LLM_MODEL", "env-model")
+    monkeypatch.setenv("CYOAI_LLM_BASE_URL", "https://new-provider.test")
+    assert load_config().llm_model == "env-model"
+    assert load_config().llm_base_url == "https://new-provider.test"
+
+
+def test_same_provider_env_preserves_saved_llm_settings(monkeypatch):
+    config = Config(llm_provider="openai", llm_model="custom-model", llm_api_key="saved-key",
+                    llm_base_url="https://provider.test")
+    save_config(config)
+    monkeypatch.setenv("CYOAI_LLM_PROVIDER", "openai")
+    assert load_config() == config
