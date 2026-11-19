@@ -144,3 +144,29 @@ def test_scripted_loop_preserves_best_checkpoint(workspace):
     assert (workspace / "best/train.py").read_text().strip() == improved.strip()
     assert json.loads((workspace / "best/metrics.json").read_text())["val_bpb"] == 1
     assert (workspace / "best/model.pt").read_text() == "1"
+
+
+@pytest.mark.parametrize("effect", ["reveal_ignored", "untrack_source"])
+def test_rollback_preserves_preexisting_files(workspace, effect):
+    ignored = workspace / "private-checkpoint.bin"
+    ignored.write_bytes(b"existing checkpoint")
+    with (workspace / ".gitignore").open("a") as stream:
+        stream.write("private-checkpoint.bin\n")
+    git(workspace, "add", ".gitignore")
+    git(workspace, "commit", "-m", "Ignore private checkpoint")
+    original = git(workspace, "rev-parse", "HEAD")
+    prepare = (workspace / "prepare.py").read_bytes()
+
+    class Runner:
+        def run(self):
+            if effect == "reveal_ignored":
+                (workspace / ".gitignore").write_text("out/\nbest/\nresults.tsv\n")
+            else:
+                git(workspace, "rm", "--cached", "prepare.py")
+            return 1, "scripted crash"
+
+    assert ResearchLoop(workspace, FakeLLM(), Runner(), 0).run() is None
+    assert git(workspace, "rev-parse", "HEAD") == original
+    assert ignored.read_bytes() == b"existing checkpoint"
+    assert (workspace / "prepare.py").read_bytes() == prepare
+    assert git(workspace, "status", "--porcelain") == ""

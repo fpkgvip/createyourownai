@@ -61,6 +61,7 @@ class ResearchLoop:
             results.write_text("commit\tval_bpb\tmemory_gb\tstatus\tdescription\n")
         try:
             for iteration in range(self.max_iters + 1):
+                existing_files = set(filter(None, git(workspace, "ls-files", "--cached", "--others", "-z").split("\0")))
                 description = "baseline"
                 candidate = best_commit
                 try:
@@ -92,7 +93,7 @@ class ResearchLoop:
                     self.log(f"Iteration {iteration} crashed: {exc}")
                     result = Result(candidate, float("inf"), 0.0, "crash", description)
                 finally:
-                    new_files = untracked() - existing_untracked
+                    new_files = untracked() - existing_files
                     git(workspace, "reset", "--hard", best_commit)
                     for name in new_files:
                         path = workspace / name
