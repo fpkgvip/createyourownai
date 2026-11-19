@@ -16,6 +16,9 @@ class HTTPProvider(ComputeProvider):
             raise MissingCredentialsError(f"Set {self.credential_env} or pass api_key")
         self.session = session if session is not None else requests.Session()
 
+    def _error_detail(self, response):
+        return ""
+
     def _request(self, method, path, *, allow_missing=False, **kwargs):
         try:
             response = self.session.request(
@@ -29,10 +32,12 @@ class HTTPProvider(ComputeProvider):
                 return None
             data = response.json()
         except (requests.RequestException, ValueError) as exc:
-            # Do not include API response bodies or headers, which may contain credentials.
-            status = getattr(locals().get("response"), "status_code", None)
+            response = locals().get("response")
+            status = getattr(response, "status_code", None)
+            detail = self._error_detail(response) if status and status >= 400 else ""
             raise ProviderError(f"{self.name} {method} {path} failed"
-                                + (f" (HTTP {status})" if status else "")) from exc
+                                + (f" (HTTP {status})" if status else "")
+                                + (f": {detail}" if detail else "")) from exc
         if isinstance(data, dict) and data.get("success") is False:
             raise ProviderError(f"{self.name} {method} {path} was rejected")
         return data

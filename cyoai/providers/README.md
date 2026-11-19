@@ -38,6 +38,9 @@ provisioning response cannot guarantee cleanup; inspect your cloud dashboard.
 Transfer desired checkpoints/results before leaving the context; teardown
 deletes the instance and its ephemeral storage. Local destroy is a no-op.
 
-The Runpod adapter intentionally implements the requested REST v1 contract at
-`rest.runpod.io/v1`. Current Runpod documentation says v1 is no longer available;
-live use requires a v2 migration. Tests mock HTTP, not live cloud availability.
+Runpod uses REST v2 at `https://api.runpod.io/v2`. `disk_gb` sets the ephemeral
+container `disk` size; no persistent or network mounts are requested. Provisioning
+sets `startSsh`, supplies `PUBLIC_KEY`, and exposes `22/tcp`. Connections use
+`ssh.direct` (not the interactive-only proxy), and listing follows every cursor
+page before filtering by name. API errors include RFC 9457 `title` and `detail`.
+Tests mock HTTP, not live cloud availability.

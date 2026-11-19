@@ -52,19 +52,21 @@ def test_credentials(cls, env, monkeypatch):
 @pytest.mark.parametrize("custom", [False, True])
 def test_runpod_provision(key, custom):
     provider = RunPodProvider(api_key="test-key", ssh_key_path=key)
-    responses.post(provider.api_url + "/pods", json={"id": "p1", "desiredStatus": "RUNNING"})
+    assert provider.api_url == "https://api.runpod.io/v2"
+    responses.post(provider.api_url + "/pods", json={"id": "p1", "status": "PROVISIONING", "ssh": {"direct": None, "proxy": None}})
     kwargs = {"gpu": "A100", "image": "custom-image", "disk_gb": 100, "name": "cyoai-test"} if custom else {}
     instance = provider.provision(**kwargs)
     body = json.loads(responses.calls[0].request.body)
     assert body == {
-        "name": kwargs.get("name", "cyoai"), "imageName": kwargs.get("image", provider.default_image),
-        "gpuTypeIds": [kwargs.get("gpu", "NVIDIA GeForce RTX 4090")], "gpuCount": 1,
-        "containerDiskInGb": kwargs.get("disk_gb", 50), "ports": ["22/tcp"],
-        "supportPublicIp": True, "env": {"PUBLIC_KEY": "ssh-ed25519 test-public-key"},
+        "name": kwargs.get("name", "cyoai"), "image": kwargs.get("image", provider.default_image),
+        "gpu": {"id": kwargs.get("gpu", "NVIDIA GeForce RTX 4090"), "count": 1},
+        "disk": kwargs.get("disk_gb", 50), "ports": ["22/tcp"],
+        "startSsh": True, "env": {"PUBLIC_KEY": "ssh-ed25519 test-public-key"},
     }
     assert responses.calls[0].request.headers["Authorization"] == "Bearer test-key"
     assert instance.id == "p1"
-    assert instance.status == "running"
+    assert instance.status == "provisioning"
+    assert instance.ssh_host is None
 
 
 @responses.activate
@@ -119,15 +121,91 @@ def test_no_vast_offers(key):
 @responses.activate
 def test_runpod_get_list():
     provider = RunPodProvider(api_key="test")
-    data = {"id": "p1", "name": "cyoai", "desiredStatus": "RUNNING", "publicIp": "1.2.3.4",
-            "portMappings": {"22": 2201}, "costPerHr": 0.5, "gpu": {"displayName": "4090"}}
+    data = {"id": "p1", "name": "cyoai", "status": "RUNNING",
+            "ssh": {"direct": {"host": "1.2.3.4", "port": 2201, "username": "trainer",
+                               "command": "ssh trainer@1.2.3.4 -p 2201"},
+                    "proxy": {"host": "ssh.runpod.io", "port": 22, "username": "opaque",
+                              "command": "ssh opaque@ssh.runpod.io"}},
+            "cost": 0.5, "gpu": {"id": "4090", "count": 1}}
     responses.get(provider.api_url + "/pods/p1", json=data)
-    responses.get(provider.api_url + "/pods", json=[data, {**data, "name": "unrelated"}, {**data, "name": None},
-                                                       {**data, "id": "p2", "name": "cyoai-test"}])
+    responses.get(provider.api_url + "/pods", json={
+        "pods": [data, {**data, "name": "unrelated"}, {**data, "name": None},
+                 {**data, "id": "p2", "name": "cyoai-test"}],
+        "pagination": {"nextCursor": None, "hasNextPage": False}})
     instance = provider.get("p1")
     assert (instance.ssh_host, instance.ssh_port, instance.gpu, instance.cost_per_hr) == ("1.2.3.4", 2201, "4090", 0.5)
     assert instance.raw == data
+    assert instance.ssh_user == "trainer"
     assert [i.id for i in provider.list_instances()] == ["p1", "p2"]
+
+
+@responses.activate
+def test_runpod_paginated_list():
+    provider = RunPodProvider(api_key="test")
+    url = "https://api.runpod.io/v2/pods"
+    responses.get(url, json={"pods": [{"id": "other", "name": "other", "status": "RUNNING"}],
+                            "pagination": {"nextCursor": "opaque+/=", "hasNextPage": True}})
+    responses.get(url + "?cursor=opaque%2B%2F%3D", json={
+        "pods": [{"id": "p1", "name": "cyoai", "status": "RUNNING", "ssh": {"direct": None}}],
+        "pagination": {"nextCursor": "last", "hasNextPage": True}})
+    responses.get(url + "?cursor=last", json={
+        "pods": [{"id": "p2", "name": "cyoai-test", "status": "ERROR"}],
+        "pagination": {"nextCursor": None, "hasNextPage": False}})
+    instances = provider.list_instances()
+    assert [item.id for item in instances] == ["p1", "p2"]
+    assert instances[0].ssh_host is None
+    assert len(responses.calls) == 3
+
+
+@responses.activate
+@pytest.mark.parametrize("cursor", [None, "repeated"])
+def test_runpod_invalid_pagination(cursor):
+    provider = RunPodProvider(api_key="test")
+    responses.get(provider.api_url + "/pods", json={
+        "pods": [], "pagination": {"nextCursor": cursor, "hasNextPage": True}})
+    with pytest.raises(ProviderError, match="pagination cursor"):
+        provider.list_instances()
+
+
+@responses.activate
+@pytest.mark.parametrize("status", ["PROVISIONING", "STARTING", "RUNNING"])
+def test_runpod_waits_for_direct_ssh(status):
+    provider = RunPodProvider(api_key="test")
+    responses.get(provider.api_url + "/pods/p1", json={
+        "id": "p1", "status": status, "ssh": {"direct": None,
+        "proxy": {"host": "ssh.runpod.io", "port": 22, "username": "opaque"}}})
+    with pytest.raises(ProviderError, match="Timed out"):
+        provider.wait_ready(Instance("p1", "runpod", "pending"), timeout=0)
+
+
+@responses.activate
+def test_runpod_error_status_fails_immediately():
+    provider = RunPodProvider(api_key="test")
+    responses.get(provider.api_url + "/pods/p1", json={"id": "p1", "status": "ERROR"})
+    with patch("cyoai.providers.base.time.sleep") as sleep:
+        with pytest.raises(ProviderError, match="p1: error"):
+            provider.wait_ready(Instance("p1", "runpod", "pending"))
+    sleep.assert_not_called()
+
+
+@responses.activate
+@pytest.mark.parametrize("problem,expected", [
+    ({"title": "Bad Request", "status": 422, "detail": "GPU type is unavailable."},
+     "Bad Request: GPU type is unavailable."),
+    ({"title": "Bad Request"}, "Bad Request"),
+    ({"detail": "Invalid disk"}, "Invalid disk"),
+    ({"detail": "Invalid secret-api-key"}, "Invalid [REDACTED]"),
+    (["unexpected"], "HTTP 422"),
+    ({"title": 5, "detail": None}, "HTTP 422"),
+])
+def test_runpod_problem_errors(problem, expected):
+    provider = RunPodProvider(api_key="secret-api-key")
+    responses.get(provider.api_url + "/pods", status=422, json=problem,
+                  content_type="application/problem+json")
+    with pytest.raises(ProviderError) as error:
+        provider.list_instances()
+    assert expected in str(error.value)
+    assert "secret-api-key" not in str(error.value)
 
 
 @responses.activate
@@ -149,7 +227,8 @@ def instance_url(provider, suffix=""):
 
 @responses.activate
 def test_empty_list(cloud):
-    responses.get(instance_url(cloud), json=[] if cloud.name == "runpod" else {"instances": []})
+    responses.get(instance_url(cloud), json={"pods": [], "pagination": {"nextCursor": None, "hasNextPage": False}}
+                  if cloud.name == "runpod" else {"instances": []})
     assert cloud.list_instances() == []
 
 
@@ -199,8 +278,9 @@ def test_wait_ready_errors(cloud, status, match):
 def test_wait_ready_http(cloud):
     if cloud.name == "runpod":
         url = cloud.api_url + "/pods/42"
-        pending = {"id": "42", "desiredStatus": "RUNNING"}
-        ready = {**pending, "publicIp": "host", "portMappings": {"22": "2200"}}
+        pending = {"id": "42", "status": "STARTING", "ssh": {"direct": None, "proxy": None}}
+        ready = {**pending, "status": "RUNNING", "ssh": {"direct": {
+            "host": "host", "port": 2200, "username": "root", "command": "ssh root@host -p 2200"}}}
     else:
         url = cloud.api_url + "/instances/42/"
         pending = {"instances": {"id": 42, "actual_status": "loading"}}
